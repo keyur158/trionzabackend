@@ -1,0 +1,487 @@
+import { Router, Request, Response } from 'express';
+import { prisma } from '../config/database';
+import { requireAuth } from '../middleware/auth';
+import { capturePayPalPayment, createPayPalOrder } from '../services/paypal';
+import { env } from '../config/env';
+import { createShopifyOrder } from '../services/shopify-order';
+import { createOrFindShopifyCustomer } from '../services/shopify-customer';
+import { sendOrderPush } from '../services/push';
+
+const router = Router();
+
+interface Totals {
+  subtotal: number;
+  shipping: number;
+  discount: number;
+  tax: number;
+  total: number;
+}
+
+async function computeTotals(customerId: string, shippingRateId: number, couponCode?: string): Promise<{
+  totals: Totals;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  cart: any;
+  shippingRate: Awaited<ReturnType<typeof prisma.shippingRate.findUnique>>;
+  coupon: Awaited<ReturnType<typeof prisma.coupon.findUnique>>;
+}> {
+  const cart = await prisma.cart.findUnique({
+    where: { customerId },
+    include: {
+      items: {
+        include: {
+          variant: { select: { id: true, title: true, price: true, availableForSale: true, inventoryQty: true } },
+          product: { select: { title: true, images: true } },
+        },
+      },
+    },
+  });
+
+  if (!cart || cart.items.length === 0) throw new Error('Cart is empty');
+
+  const subtotal = cart.items.reduce((sum, item) => sum + Number(item.variant.price) * item.quantity, 0);
+
+  const shippingRate = await prisma.shippingRate.findUnique({ where: { id: shippingRateId } });
+  if (!shippingRate || !shippingRate.isActive) throw new Error('Invalid shipping rate');
+
+  if (shippingRate.minOrderValue && subtotal < Number(shippingRate.minOrderValue)) {
+    throw new Error(`Minimum order of $${shippingRate.minOrderValue} required for this shipping option`);
+  }
+
+  const shipping = Number(shippingRate.price);
+
+  let discount = 0;
+  let coupon = null;
+  if (couponCode) {
+    coupon = await prisma.coupon.findUnique({ where: { code: couponCode.toUpperCase() } });
+    if (
+      coupon && coupon.isActive &&
+      (!coupon.expiresAt || coupon.expiresAt > new Date()) &&
+      (!coupon.maxUses || coupon.usedCount < coupon.maxUses) &&
+      (!coupon.minOrderValue || subtotal >= Number(coupon.minOrderValue))
+    ) {
+      discount = coupon.discountType === 'percentage'
+        ? (subtotal * Number(coupon.discountValue)) / 100
+        : Math.min(Number(coupon.discountValue), subtotal);
+    }
+  }
+
+  const tax = 0;
+  const total = Math.max(0, subtotal + shipping - discount + tax);
+
+  return { totals: { subtotal, shipping, discount, tax, total }, cart: cart as never, shippingRate, coupon };
+}
+
+router.post('/calculate', requireAuth, async (req: Request, res: Response) => {
+  const { shippingRateId, couponCode } = req.body;
+  if (!shippingRateId) {
+    res.status(400).json({ message: 'shippingRateId is required' });
+    return;
+  }
+  try {
+    const { totals } = await computeTotals(req.user!.id, parseInt(shippingRateId), couponCode);
+    res.json({
+      subtotal: totals.subtotal.toFixed(2),
+      shipping: totals.shipping.toFixed(2),
+      discount: totals.discount.toFixed(2),
+      tax: totals.tax.toFixed(2),
+      total: totals.total.toFixed(2),
+    });
+  } catch (err: unknown) {
+    res.status(400).json({ message: err instanceof Error ? err.message : 'Calculation failed' });
+  }
+});
+
+router.post('/validate-coupon', requireAuth, async (req: Request, res: Response) => {
+  const { code } = req.body;
+  if (!code) {
+    res.status(400).json({ message: 'code is required' });
+    return;
+  }
+  const coupon = await prisma.coupon.findUnique({ where: { code: code.toUpperCase() } });
+  if (!coupon || !coupon.isActive) {
+    res.status(404).json({ message: 'Invalid coupon code' });
+    return;
+  }
+  if (coupon.expiresAt && coupon.expiresAt < new Date()) {
+    res.status(400).json({ message: 'Coupon has expired' });
+    return;
+  }
+  if (coupon.maxUses && coupon.usedCount >= coupon.maxUses) {
+    res.status(400).json({ message: 'Coupon usage limit reached' });
+    return;
+  }
+  res.json({ code: coupon.code, discountType: coupon.discountType, discountValue: coupon.discountValue, minOrderValue: coupon.minOrderValue });
+});
+
+// Creates a PayPal order server-side (secret never leaves the server) and returns the
+// approval URL for the app to open in a webview. The order is captured later in /create-order.
+router.post('/create-paypal-order', requireAuth, async (req: Request, res: Response) => {
+  const { shippingRateId, couponCode } = req.body;
+  if (!shippingRateId) {
+    res.status(400).json({ message: 'shippingRateId is required' });
+    return;
+  }
+
+  let totals: Totals;
+  try {
+    const result = await computeTotals(req.user!.id, parseInt(shippingRateId), couponCode);
+    totals = result.totals;
+  } catch (err: unknown) {
+    res.status(400).json({ message: err instanceof Error ? err.message : 'Calculation failed' });
+    return;
+  }
+
+  try {
+    const order = await createPayPalOrder(
+      totals.total.toFixed(2),
+      'USD',
+      `${env.APP_PUBLIC_URL}/paypal/success`,
+      `${env.APP_PUBLIC_URL}/paypal/cancel`
+    );
+    res.json({ paypalOrderId: order.id, approveUrl: order.approveUrl });
+  } catch (err) {
+    res.status(502).json({ message: 'Could not start PayPal payment', error: String(err) });
+  }
+});
+
+router.post('/create-order', requireAuth, async (req: Request, res: Response) => {
+  const { addressId, shippingRateId, couponCode, paypalOrderId } = req.body;
+  if (!addressId || !shippingRateId || !paypalOrderId) {
+    res.status(400).json({ message: 'addressId, shippingRateId, and paypalOrderId are required' });
+    return;
+  }
+
+  const customer = await prisma.customer.findUnique({
+    where: { id: req.user!.id },
+    include: { deviceTokens: true },
+  });
+  if (!customer) {
+    res.status(404).json({ message: 'Customer not found' });
+    return;
+  }
+
+  const address = await prisma.address.findFirst({ where: { id: parseInt(addressId), customerId: customer.id } });
+  if (!address) {
+    res.status(404).json({ message: 'Address not found' });
+    return;
+  }
+
+  let totals: Totals, cart: Awaited<ReturnType<typeof prisma.cart.findUnique>>, coupon: Awaited<ReturnType<typeof prisma.coupon.findUnique>>;
+  try {
+    const result = await computeTotals(customer.id, parseInt(shippingRateId), couponCode);
+    totals = result.totals;
+    cart = result.cart;
+    coupon = result.coupon;
+  } catch (err: unknown) {
+    res.status(400).json({ message: err instanceof Error ? err.message : 'Checkout calculation failed' });
+    return;
+  }
+
+  // Check stock
+  const fullCart = await prisma.cart.findUnique({
+    where: { customerId: customer.id },
+    include: { items: { include: { variant: true, product: { select: { title: true } } } } },
+  });
+  const outOfStock = fullCart?.items.find(item => !item.variant.availableForSale);
+  if (outOfStock) {
+    res.status(409).json({ message: `Item "${outOfStock.variantId}" is out of stock` });
+    return;
+  }
+
+  // Capture PayPal
+  let paypalResult;
+  try {
+    paypalResult = await capturePayPalPayment(paypalOrderId);
+  } catch (err) {
+    res.status(402).json({ message: 'PayPal capture failed', error: String(err) });
+    return;
+  }
+
+  if (paypalResult.status !== 'COMPLETED') {
+    res.status(402).json({ message: `Payment not completed: ${paypalResult.status}` });
+    return;
+  }
+
+  const capturedAmount = parseFloat(paypalResult.amount);
+  const expectedTotal = parseFloat(totals.total.toFixed(2));
+  if (Math.abs(capturedAmount - expectedTotal) > 0.01) {
+    res.status(402).json({ message: 'Payment amount mismatch' });
+    return;
+  }
+
+  // Build line items for storage
+  const lineItemsData = fullCart!.items.map(item => ({
+    variantId: item.variantId,
+    productId: item.productId,
+    productTitle: item.product.title,
+    variantTitle: item.variant.title,
+    quantity: item.quantity,
+    price: Number(item.variant.price).toFixed(2),
+    ...(item.properties ? { properties: item.properties } : {}),
+  }));
+
+  const shippingAddressJson = {
+    address1: address.address1,
+    address2: address.address2,
+    city: address.city,
+    province: address.province,
+    country: address.country,
+    zip: address.zip,
+    firstName: address.firstName,
+    lastName: address.lastName,
+    phone: address.phone,
+  };
+
+  // Resolve Shopify customer ID before creating the Shopify order
+  let shopifyCustomerId = customer.shopifyCustomerId;
+  if (!shopifyCustomerId) {
+    try {
+      const shopifyGid = await createOrFindShopifyCustomer({
+        email: customer.email,
+        firstName: customer.firstName ?? undefined,
+        lastName: customer.lastName ?? undefined,
+        phone: customer.phone ?? undefined,
+      });
+      if (shopifyGid) {
+        shopifyCustomerId = shopifyGid;
+        await prisma.customer.update({ where: { id: customer.id }, data: { shopifyCustomerId: shopifyGid } });
+      }
+    } catch (err) {
+      console.error('Shopify customer lookup failed:', err);
+    }
+  }
+
+  // Create Shopify order synchronously so we get the real order number (#1001, #1002 …)
+  let shopifyOrderResult: { id: string; name: string } | null = null;
+  if (shopifyCustomerId) {
+    try {
+      shopifyOrderResult = await createShopifyOrder({
+        lineItems: fullCart!.items.map(item => ({ variantId: item.variantId, quantity: item.quantity })),
+        shopifyCustomerId,
+        customerEmail: customer.email,
+        shippingAddress: shippingAddressJson,
+        totalPrice: totals.total.toFixed(2),
+        paypalTransactionId: paypalResult.transactionId,
+      });
+    } catch (err) {
+      console.error('Shopify order creation failed:', err);
+    }
+  }
+
+  let orderNumber: string;
+  if (shopifyOrderResult?.name) {
+    orderNumber = shopifyOrderResult.name.replace('#', '');
+  } else {
+    const orderCount = await prisma.order.count();
+    orderNumber = `APP-${1001 + orderCount}`;
+  }
+
+  const order = await prisma.$transaction(async (tx) => {
+    const created = await tx.order.create({
+      data: {
+        orderNumber,
+        customerId: customer.id,
+        customerEmail: customer.email,
+        lineItems: lineItemsData,
+        subtotalPrice: totals.subtotal,
+        totalShipping: totals.shipping,
+        totalDiscount: totals.discount,
+        totalTax: totals.tax,
+        totalPrice: totals.total,
+        currencyCode: 'USD',
+        financialStatus: 'paid',
+        fulfillmentStatus: 'unfulfilled',
+        shippingAddress: shippingAddressJson,
+        couponCode: couponCode ?? null,
+        ...(shopifyOrderResult && {
+          shopifyOrderId: shopifyOrderResult.id.split('/').pop(),
+          shopifyCreatedAt: new Date(),
+        }),
+      },
+    });
+    await tx.payment.create({
+      data: {
+        orderId: created.id,
+        paymentMethod: 'paypal',
+        paymentId: paypalResult.transactionId,
+        status: 'completed',
+        amount: totals.total,
+        currency: 'USD',
+        rawResponse: paypalResult.raw as never,
+      },
+    });
+    await tx.cartItem.deleteMany({ where: { cartId: fullCart!.id! } });
+    if (coupon) {
+      await tx.coupon.update({ where: { id: coupon.id }, data: { usedCount: { increment: 1 } } });
+    }
+    return created;
+  });
+
+  res.json({ success: true, order: { id: order.id, orderNumber: order.orderNumber, totalPrice: order.totalPrice, financialStatus: order.financialStatus } });
+
+  setImmediate(async () => {
+    try {
+      const tokens = customer.deviceTokens.map(dt => dt.fcmToken);
+      if (tokens.length > 0) await sendOrderPush(tokens, 'confirmed', orderNumber);
+    } catch (err) {
+      console.error('FCM push failed:', err);
+    }
+  });
+});
+
+// TEST ONLY — bypasses PayPal, still syncs order to Shopify. Disabled in production.
+router.post('/create-order-test', requireAuth, async (req: Request, res: Response) => {
+  if (process.env.NODE_ENV === 'production') {
+    res.status(404).json({ message: 'Not found' });
+    return;
+  }
+  const { addressId, shippingRateId, couponCode } = req.body;
+  if (!addressId || !shippingRateId) {
+    res.status(400).json({ message: 'addressId and shippingRateId are required' });
+    return;
+  }
+
+  const customer = await prisma.customer.findUnique({
+    where: { id: req.user!.id },
+    include: { deviceTokens: true },
+  });
+  if (!customer) { res.status(404).json({ message: 'Customer not found' }); return; }
+
+  const address = await prisma.address.findFirst({ where: { id: parseInt(addressId), customerId: customer.id } });
+  if (!address) { res.status(404).json({ message: 'Address not found' }); return; }
+
+  let totals: Totals, cart: Awaited<ReturnType<typeof prisma.cart.findUnique>>, coupon: Awaited<ReturnType<typeof prisma.coupon.findUnique>>;
+  try {
+    const result = await computeTotals(customer.id, parseInt(shippingRateId), couponCode);
+    totals = result.totals;
+    cart = result.cart;
+    coupon = result.coupon;
+  } catch (err: unknown) {
+    res.status(400).json({ message: err instanceof Error ? err.message : 'Checkout calculation failed' });
+    return;
+  }
+
+  const fullCart = await prisma.cart.findUnique({
+    where: { customerId: customer.id },
+    include: { items: { include: { variant: true, product: { select: { title: true } } } } },
+  });
+  const outOfStock = fullCart?.items.find(item => !item.variant.availableForSale);
+  if (outOfStock) {
+    res.status(409).json({ message: `Item "${outOfStock.variantId}" is out of stock` });
+    return;
+  }
+
+  const lineItemsData = fullCart!.items.map(item => ({
+    variantId: item.variantId,
+    productId: item.productId,
+    productTitle: item.product.title,
+    variantTitle: item.variant.title,
+    quantity: item.quantity,
+    price: Number(item.variant.price).toFixed(2),
+    ...(item.properties ? { properties: item.properties } : {}),
+  }));
+
+  const shippingAddressJson = {
+    address1: address.address1,
+    address2: address.address2,
+    city: address.city,
+    province: address.province,
+    country: address.country,
+    zip: address.zip,
+    firstName: address.firstName,
+    lastName: address.lastName,
+    phone: address.phone,
+  };
+
+  // Resolve Shopify customer ID before creating the Shopify order
+  let shopifyCustomerIdTest = customer.shopifyCustomerId;
+  if (!shopifyCustomerIdTest) {
+    try {
+      const shopifyGid = await createOrFindShopifyCustomer({
+        email: customer.email,
+        firstName: customer.firstName ?? undefined,
+        lastName: customer.lastName ?? undefined,
+        phone: customer.phone ?? undefined,
+      });
+      if (shopifyGid) {
+        shopifyCustomerIdTest = shopifyGid;
+        await prisma.customer.update({ where: { id: customer.id }, data: { shopifyCustomerId: shopifyGid } });
+      }
+    } catch (err) {
+      console.error('[TEST] Shopify customer lookup failed:', err);
+    }
+  }
+
+  // Create Shopify order synchronously to get the real order number
+  let shopifyOrderResultTest: { id: string; name: string } | null = null;
+  if (shopifyCustomerIdTest) {
+    try {
+      shopifyOrderResultTest = await createShopifyOrder({
+        lineItems: fullCart!.items.map(item => ({ variantId: item.variantId, quantity: item.quantity })),
+        shopifyCustomerId: shopifyCustomerIdTest,
+        customerEmail: customer.email,
+        shippingAddress: shippingAddressJson,
+        totalPrice: totals.total.toFixed(2),
+        paypalTransactionId: `TEST-${Date.now()}`,
+      });
+      if (shopifyOrderResultTest) {
+        console.log(`[TEST] Shopify order created: ${shopifyOrderResultTest.id}`);
+      }
+    } catch (err) {
+      console.error('[TEST] Shopify order creation failed:', err);
+    }
+  }
+
+  let orderNumber: string;
+  if (shopifyOrderResultTest?.name) {
+    orderNumber = shopifyOrderResultTest.name.replace('#', '');
+  } else {
+    const orderCount = await prisma.order.count();
+    orderNumber = `APP-${1001 + orderCount}`;
+  }
+
+  const order = await prisma.$transaction(async (tx) => {
+    const created = await tx.order.create({
+      data: {
+        orderNumber,
+        customerId: customer.id,
+        customerEmail: customer.email,
+        lineItems: lineItemsData,
+        subtotalPrice: totals.subtotal,
+        totalShipping: totals.shipping,
+        totalDiscount: totals.discount,
+        totalTax: totals.tax,
+        totalPrice: totals.total,
+        currencyCode: 'USD',
+        financialStatus: 'pending',
+        fulfillmentStatus: 'unfulfilled',
+        shippingAddress: shippingAddressJson,
+        couponCode: couponCode ?? null,
+        ...(shopifyOrderResultTest && {
+          shopifyOrderId: shopifyOrderResultTest.id.split('/').pop(),
+          shopifyCreatedAt: new Date(),
+        }),
+      },
+    });
+    await tx.payment.create({
+      data: {
+        orderId: created.id,
+        paymentMethod: 'test',
+        paymentId: `TEST-${Date.now()}`,
+        status: 'pending',
+        amount: totals.total,
+        currency: 'USD',
+        rawResponse: {} as never,
+      },
+    });
+    await tx.cartItem.deleteMany({ where: { cartId: fullCart!.id! } });
+    if (coupon) {
+      await tx.coupon.update({ where: { id: coupon.id }, data: { usedCount: { increment: 1 } } });
+    }
+    return created;
+  });
+
+  res.json({ success: true, order: { id: order.id, orderNumber: order.orderNumber, totalPrice: order.totalPrice, financialStatus: order.financialStatus } });
+});
+
+export default router;

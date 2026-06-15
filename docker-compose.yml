@@ -1,0 +1,16 @@
+version: '3.8'
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: trionza_diamond_db
+    environment:
+      POSTGRES_DB: trionza_diamond
+      POSTGRES_USER: trionza_user
+      POSTGRES_PASSWORD: trionza_pass
+    volumes:
+      - trionza_pgdata:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    restart: always
+volumes:
+  trionza_pgdata:

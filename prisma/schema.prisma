@@ -1,0 +1,243 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Product {
+  id               String             @id
+  title            String
+  handle           String             @unique
+  description      String?
+  descriptionHtml  String?
+  vendor           String?
+  productType      String?
+  tags             String[]
+  availableForSale Boolean            @default(true)
+  minPrice         Decimal?           @db.Decimal(10, 2)
+  maxPrice         Decimal?           @db.Decimal(10, 2)
+  compareAtPrice   Decimal?           @db.Decimal(10, 2)
+  currencyCode     String             @default("USD")
+  images           Json               @default("[]")
+  metafields       Json               @default("{}")
+  shopifyCreatedAt DateTime?
+  shopifyUpdatedAt DateTime?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+  variants         ProductVariant[]
+  collections      CollectionProduct[]
+  cartItems        CartItem[]
+
+  @@index([availableForSale])
+  @@index([productType])
+  @@index([createdAt])
+  @@index([minPrice])
+  @@index([availableForSale, productType])
+  @@index([availableForSale, createdAt])
+  @@index([availableForSale, minPrice])
+}
+
+model ProductVariant {
+  id               String     @id
+  productId        String
+  product          Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
+  title            String
+  price            Decimal    @db.Decimal(10, 2)
+  compareAtPrice   Decimal?   @db.Decimal(10, 2)
+  currencyCode     String     @default("USD")
+  availableForSale Boolean    @default(true)
+  sku              String?
+  inventoryQty     Int        @default(0)
+  selectedOptions  Json       @default("[]")
+  imageUrl         String?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+  cartItems        CartItem[]
+}
+
+model Collection {
+  id               String              @id
+  title            String
+  handle           String              @unique
+  description      String?
+  imageUrl         String?
+  sortOrder        String?
+  shopifyUpdatedAt DateTime?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+  products         CollectionProduct[]
+}
+
+model CollectionProduct {
+  collectionId String
+  collection   Collection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  productId    String
+  product      Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
+  position     Int        @default(0)
+
+  @@id([collectionId, productId])
+}
+
+model Customer {
+  id                String        @id @default(uuid())
+  email             String        @unique
+  passwordHash      String?
+  firstName         String?
+  lastName          String?
+  phone             String?
+  shopifyCustomerId String?       @unique
+  shopifyCreatedAt  DateTime?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  cart              Cart?
+  orders            Order[]
+  addresses         Address[]
+  deviceTokens      DeviceToken[]
+}
+
+model Cart {
+  id         Int        @id @default(autoincrement())
+  customerId String     @unique
+  customer   Customer   @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+  items      CartItem[]
+}
+
+model CartItem {
+  id         Int            @id @default(autoincrement())
+  cartId     Int
+  cart       Cart           @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  productId  String
+  product    Product        @relation(fields: [productId], references: [id])
+  variantId  String
+  variant    ProductVariant @relation(fields: [variantId], references: [id])
+  quantity   Int            @default(1)
+  properties Json?
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+
+  @@unique([cartId, variantId])
+}
+
+model Order {
+  id                String    @id @default(uuid())
+  shopifyOrderId    String?   @unique
+  orderNumber       String
+  customerId        String
+  customer          Customer  @relation(fields: [customerId], references: [id])
+  customerEmail     String
+  lineItems         Json
+  subtotalPrice     Decimal?  @db.Decimal(10, 2)
+  totalShipping     Decimal?  @db.Decimal(10, 2)
+  totalDiscount     Decimal?  @db.Decimal(10, 2)
+  totalTax          Decimal?  @db.Decimal(10, 2)
+  totalPrice        Decimal   @db.Decimal(10, 2)
+  currencyCode      String    @default("USD")
+  financialStatus   String?
+  fulfillmentStatus String?
+  shippingAddress   Json?
+  trackingUrl       String?
+  trackingNumber    String?
+  couponCode        String?
+  cancelledAt       DateTime?
+  shopifyCreatedAt  DateTime?
+  shopifyUpdatedAt  DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  payments          Payment[]
+
+  @@index([customerId])
+}
+
+model Payment {
+  id            Int      @id @default(autoincrement())
+  orderId       String
+  order         Order    @relation(fields: [orderId], references: [id])
+  paymentMethod String
+  paymentId     String
+  status        String
+  amount        Decimal  @db.Decimal(10, 2)
+  currency      String   @default("USD")
+  rawResponse   Json?
+  createdAt     DateTime @default(now())
+
+  @@index([orderId])
+}
+
+model Address {
+  id         Int      @id @default(autoincrement())
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  firstName  String?
+  lastName   String?
+  address1   String
+  address2   String?
+  city       String
+  province   String?
+  country    String
+  zip        String
+  phone      String?
+  isDefault  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+}
+
+model ShippingRate {
+  id            Int      @id @default(autoincrement())
+  name          String
+  price         Decimal  @db.Decimal(10, 2)
+  minDays       Int?
+  maxDays       Int?
+  countryCodes  String[]
+  minOrderValue Decimal? @db.Decimal(10, 2)
+  isActive      Boolean  @default(true)
+}
+
+model Coupon {
+  id            Int       @id @default(autoincrement())
+  code          String    @unique
+  discountType  String
+  discountValue Decimal   @db.Decimal(10, 2)
+  minOrderValue Decimal?  @db.Decimal(10, 2)
+  maxUses       Int?
+  usedCount     Int       @default(0)
+  expiresAt     DateTime?
+  isActive      Boolean   @default(true)
+}
+
+model DeviceToken {
+  id            Int      @id @default(autoincrement())
+  customerEmail String
+  customer      Customer @relation(fields: [customerEmail], references: [email], onDelete: Cascade)
+  fcmToken      String   @unique
+  deviceType    String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([customerEmail])
+}
+
+model WebhookEvent {
+  eventId     String   @id
+  topic       String
+  processedAt DateTime @default(now())
+}
+
+model OtpCode {
+  id        String    @id @default(uuid())
+  email     String
+  codeHash  String
+  purpose   String // "login" | "signup"
+  firstName String?
+  lastName  String?
+  phone     String?
+  attempts  Int       @default(0)
+  expiresAt DateTime
+  consumedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([email, purpose])
+}
