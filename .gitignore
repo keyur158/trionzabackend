@@ -1,6 +1,24 @@
+# Dependencies
 node_modules/
+
+# Build output
 dist/
+*.tsbuildinfo
+
+# Environment / secrets
 .env
+.env.*
+!.env.example
 firebase-service-account.json
 
+# Generated code
 /src/generated/prisma
+
+# Test coverage
+coverage/
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
