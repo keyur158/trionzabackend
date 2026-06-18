@@ -20,6 +20,8 @@ const envSchema = z.object({
   ZEPTOMAIL_API_BASE: z.string().default('https://api.zeptomail.com'),
   ZEPTOMAIL_FROM_ADDRESS: z.string().default('noreply@trionzadiamond.com'),
   ZEPTOMAIL_FROM_NAME: z.string().default('Trionza Diamond'),
+  // Where appointment / custom-order notifications are delivered.
+  ADMIN_EMAIL: z.string().default('manthanzlj@gmail.com'),
   APP_PUBLIC_URL: z.string().default('https://trionzadiamond.com'),
   FIREBASE_SERVICE_ACCOUNT: z.string().default('./firebase-service-account.json'),
   SYNC_INTERVAL_HOURS: z.coerce.number().int().min(1).default(6),

@@ -17,6 +17,7 @@ import addressRoutes from './routes/addresses';
 import deviceRoutes from './routes/devices';
 import shippingRoutes from './routes/shipping';
 import webhookRoutes from './routes/webhooks';
+import inquiryRoutes from './routes/inquiries';
 
 const app = express();
 
@@ -36,6 +37,7 @@ app.use('/api/orders', orderRoutes);
 app.use('/api/addresses', addressRoutes);
 app.use('/api/devices', deviceRoutes);
 app.use('/api/shipping-rates', shippingRoutes);
+app.use('/api/inquiries', inquiryRoutes);
 app.use('/webhooks', webhookRoutes);
 
 app.get('/api/health', async (_req, res) => {
