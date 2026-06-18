@@ -1,7 +1,8 @@
 import axios from 'axios';
 import { env } from '../config/env';
 
-const ZEPTOMAIL_API = 'https://api.zeptomail.com/v1.1/email';
+// Region-dependent: .com (US), .eu (Europe), .in (India). Configurable via env.
+const ZEPTOMAIL_API = `${env.ZEPTOMAIL_API_BASE}/v1.1/email`;
 
 function otpEmailHtml(code: string): string {
   return `<!DOCTYPE html>
@@ -68,7 +69,10 @@ export async function sendOtpEmail(email: string, code: string): Promise<void> {
       },
       {
         headers: {
-          Authorization: `Zoho-enczapikey ${env.ZEPTOMAIL_TOKEN}`,
+          // Tolerate a token pasted with or without the "Zoho-enczapikey " prefix.
+          Authorization: env.ZEPTOMAIL_TOKEN.startsWith('Zoho-enczapikey')
+            ? env.ZEPTOMAIL_TOKEN
+            : `Zoho-enczapikey ${env.ZEPTOMAIL_TOKEN}`,
           'Content-Type': 'application/json',
         },
       }

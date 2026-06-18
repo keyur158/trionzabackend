@@ -17,6 +17,7 @@ const envSchema = z.object({
   PAYPAL_SECRET: z.string(),
   PAYPAL_MODE: z.enum(['sandbox', 'live']).default('sandbox'),
   ZEPTOMAIL_TOKEN: z.string().default(''),
+  ZEPTOMAIL_API_BASE: z.string().default('https://api.zeptomail.com'),
   ZEPTOMAIL_FROM_ADDRESS: z.string().default('noreply@trionzadiamond.com'),
   ZEPTOMAIL_FROM_NAME: z.string().default('Trionza Diamond'),
   APP_PUBLIC_URL: z.string().default('https://trionzadiamond.com'),
