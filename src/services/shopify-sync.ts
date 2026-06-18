@@ -179,7 +179,7 @@ export async function syncProducts(): Promise<number> {
         total++;
       } catch (err: any) {
         const msg = err?.message || err?.toString() || String(err);
-        console.warn(`[sync] Skipping product ${productId} (${node.handle}): ${msg.slice(0, 200)}`);
+        console.warn(`[sync] Skipping product ${productId} (${node.handle}): ${msg}`);
       }
     }
 
