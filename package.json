@@ -13,6 +13,7 @@
     "db:migrate": "prisma migrate dev",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
+    "db:seed": "tsx src/scripts/seed-shipping.ts",
     "sync": "tsx src/scripts/initial-sync.ts",
     "ngrok": "ngrok http 3000",
     "dev:tunnel": "concurrently \"npm run dev\" \"npm run ngrok\""
