@@ -23,6 +23,8 @@ model Product {
   currencyCode     String             @default("USD")
   images           Json               @default("[]")
   metafields       Json               @default("{}")
+  avgRating        Float?
+  reviewCount      Int                @default(0)
   shopifyCreatedAt DateTime?
   shopifyUpdatedAt DateTime?
   createdAt        DateTime           @default(now())
@@ -30,6 +32,7 @@ model Product {
   variants         ProductVariant[]
   collections      CollectionProduct[]
   cartItems        CartItem[]
+  reviews          Review[]
 
   @@index([availableForSale])
   @@index([productType])
@@ -96,6 +99,7 @@ model Customer {
   orders            Order[]
   addresses         Address[]
   deviceTokens      DeviceToken[]
+  reviews           Review[]
 }
 
 model Cart {
@@ -240,4 +244,23 @@ model OtpCode {
   createdAt DateTime  @default(now())
 
   @@index([email, purpose])
+}
+
+model Review {
+  id          String   @id @default(uuid())
+  productId   String
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  customerId  String
+  customer    Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  rating      Int
+  title       String?
+  body        String
+  authorName  String
+  isVerified  Boolean  @default(false)
+  status      String   @default("published")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([productId, customerId])
+  @@index([productId])
 }
