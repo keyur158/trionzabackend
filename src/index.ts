@@ -1,3 +1,4 @@
+
 import dotenv from 'dotenv';
 dotenv.config();
 
@@ -19,6 +20,10 @@ import shippingRoutes from './routes/shipping';
 import webhookRoutes from './routes/webhooks';
 import inquiryRoutes from './routes/inquiries';
 import reviewRoutes from './routes/reviews';
+import appVersionRoutes from './routes/appVersion';
+import adminAppVersionRoutes from './routes/adminAppVersions';
+import adminNotificationRoutes from './routes/adminNotifications';
+import adminStatsRoutes from './routes/adminStats';
 
 const app = express();
 
@@ -40,6 +45,10 @@ app.use('/api/devices', deviceRoutes);
 app.use('/api/shipping-rates', shippingRoutes);
 app.use('/api/inquiries', inquiryRoutes);
 app.use('/api/products', reviewRoutes);
+app.use('/api/app', appVersionRoutes);
+app.use('/api/admin/app-versions', adminAppVersionRoutes);
+app.use('/api/admin/notifications', adminNotificationRoutes);
+app.use('/api/admin/stats', adminStatsRoutes);
 app.use('/webhooks', webhookRoutes);
 
 app.get('/api/health', async (_req, res) => {

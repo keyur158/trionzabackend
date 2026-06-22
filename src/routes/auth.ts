@@ -9,6 +9,7 @@ import {
   getShopifyCustomerByEmail,
 } from '../services/shopify-customer';
 import { sendOtpEmail } from '../services/email';
+import { isAdminEmail } from '../utils/admin';
 
 const router = Router();
 
@@ -40,6 +41,7 @@ function tokenResponse(customer: { id: string; email: string; firstName: string 
       email: customer.email,
       firstName: customer.firstName,
       lastName: customer.lastName,
+      isAdmin: isAdminEmail(customer.email),
     },
   };
 }
@@ -226,7 +228,7 @@ router.get('/profile', requireAuth, async (req: Request, res: Response) => {
     res.status(404).json({ message: 'Customer not found' });
     return;
   }
-  res.json({ customer });
+  res.json({ customer: { ...customer, isAdmin: isAdminEmail(customer.email) } });
 });
 
 router.put('/profile', requireAuth, async (req: Request, res: Response) => {

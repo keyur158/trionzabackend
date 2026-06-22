@@ -264,3 +264,17 @@ model Review {
   @@unique([productId, customerId])
   @@index([productId])
 }
+
+model AppVersion {
+  id        Int      @id @default(autoincrement())
+  platform  String   // "android" | "ios"
+  version   String   // e.g. "1.4.0"
+  forced    Boolean  @default(false)
+  message   String   @default("")
+  storeUrl  String   @default("")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([platform, version])
+  @@index([platform])
+}
