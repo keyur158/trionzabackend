@@ -75,6 +75,14 @@ describe('POST /api/products/:handle/reviews', () => {
     expect(mockCreate).not.toHaveBeenCalled();
   });
 
+  it('rejects a missing body', async () => {
+    const res = await request(app)
+      .post('/api/products/ring-a/reviews')
+      .send({ rating: 4 });
+    expect(res.status).toBe(400);
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
   it('creates a review for an authed customer', async () => {
     mockCreate.mockResolvedValue({ id: 'r1', rating: 5 });
     const res = await request(app)
