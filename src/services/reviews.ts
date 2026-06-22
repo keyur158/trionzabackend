@@ -127,7 +127,7 @@ export async function getReviewEligibility(handle: string, customerId: string) {
   const [existing, orders] = await Promise.all([
     prisma.review.findUnique({
       where: { productId_customerId: { productId: product.id, customerId } },
-      select: { id: true },
+      select: { id: true, rating: true, title: true, body: true, status: true, createdAt: true },
     }),
     prisma.order.findMany({ where: { customerId }, select: { lineItems: true } }),
   ]);
@@ -136,5 +136,36 @@ export async function getReviewEligibility(handle: string, customerId: string) {
     canReview: !alreadyReviewed,
     alreadyReviewed,
     isVerifiedBuyer: isVerifiedBuyer(orders, product.id),
+    myReview: existing ?? null,
   };
+}
+
+export async function updateOwnReview(handle: string, customerId: string, input: ReviewInput) {
+  const product = await productByHandle(handle);
+  const existing = await prisma.review.findUnique({
+    where: { productId_customerId: { productId: product.id, customerId } },
+    select: { id: true },
+  });
+  if (!existing) throw new ReviewError('NOT_FOUND', 'You have not reviewed this product');
+  const review = await prisma.review.update({
+    where: { id: existing.id },
+    data: {
+      rating: input.rating,
+      title: input.title?.trim() || null,
+      body: input.body.trim(),
+    },
+  });
+  await recomputeAggregate(product.id);
+  return review;
+}
+
+export async function deleteOwnReview(handle: string, customerId: string): Promise<void> {
+  const product = await productByHandle(handle);
+  const existing = await prisma.review.findUnique({
+    where: { productId_customerId: { productId: product.id, customerId } },
+    select: { id: true },
+  });
+  if (!existing) throw new ReviewError('NOT_FOUND', 'You have not reviewed this product');
+  await prisma.review.delete({ where: { id: existing.id } });
+  await recomputeAggregate(product.id);
 }

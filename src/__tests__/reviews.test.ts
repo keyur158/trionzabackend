@@ -4,6 +4,8 @@ jest.mock('../services/reviews', () => ({
   getProductReviews: jest.fn(),
   createReview: jest.fn(),
   getReviewEligibility: jest.fn(),
+  updateOwnReview: jest.fn(),
+  deleteOwnReview: jest.fn(),
   ReviewError: jest.requireActual('../services/reviews').ReviewError,
 }));
 jest.mock('../middleware/auth', () => ({
@@ -21,12 +23,16 @@ import {
   getProductReviews,
   createReview,
   getReviewEligibility,
+  updateOwnReview,
+  deleteOwnReview,
   ReviewError,
 } from '../services/reviews';
 
 const mockGet = getProductReviews as jest.Mock;
 const mockCreate = createReview as jest.Mock;
 const mockElig = getReviewEligibility as jest.Mock;
+const mockUpdateMine = updateOwnReview as jest.Mock;
+const mockDeleteMine = deleteOwnReview as jest.Mock;
 
 function buildApp() {
   const app = express();
@@ -122,5 +128,54 @@ describe('GET /api/products/:handle/reviews/eligibility', () => {
     );
     expect(res.status).toBe(200);
     expect(res.body.canReview).toBe(true);
+  });
+});
+
+describe('PUT /api/products/:handle/reviews/mine', () => {
+  beforeEach(() => jest.clearAllMocks());
+  const valid = { rating: 4, title: 'Updated', body: 'Even better in person.' };
+
+  it('rejects an out-of-range rating', async () => {
+    const res = await request(app)
+      .put('/api/products/ring-a/reviews/mine')
+      .send({ ...valid, rating: 0 });
+    expect(res.status).toBe(400);
+    expect(mockUpdateMine).not.toHaveBeenCalled();
+  });
+
+  it('updates the caller\'s own review', async () => {
+    mockUpdateMine.mockResolvedValue({ id: 'r1', rating: 4 });
+    const res = await request(app)
+      .put('/api/products/ring-a/reviews/mine')
+      .send(valid);
+    expect(res.status).toBe(200);
+    expect(res.body.review.id).toBe('r1');
+    expect(mockUpdateMine).toHaveBeenCalledWith('ring-a', 'cust_1', valid);
+  });
+
+  it('maps a missing review to 404', async () => {
+    mockUpdateMine.mockRejectedValue(new ReviewError('NOT_FOUND', 'No review'));
+    const res = await request(app)
+      .put('/api/products/ring-a/reviews/mine')
+      .send(valid);
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('DELETE /api/products/:handle/reviews/mine', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('deletes the caller\'s own review', async () => {
+    mockDeleteMine.mockResolvedValue(undefined);
+    const res = await request(app).delete('/api/products/ring-a/reviews/mine');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true });
+    expect(mockDeleteMine).toHaveBeenCalledWith('ring-a', 'cust_1');
+  });
+
+  it('maps a missing review to 404', async () => {
+    mockDeleteMine.mockRejectedValue(new ReviewError('NOT_FOUND', 'No review'));
+    const res = await request(app).delete('/api/products/ring-a/reviews/mine');
+    expect(res.status).toBe(404);
   });
 });

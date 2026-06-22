@@ -5,6 +5,8 @@ import {
   getProductReviews,
   createReview,
   getReviewEligibility,
+  updateOwnReview,
+  deleteOwnReview,
   ReviewError,
 } from '../services/reviews';
 
@@ -59,6 +61,39 @@ router.post('/:handle/reviews', requireAuth, async (req: Request, res: Response)
   } catch (err) {
     if (err instanceof ReviewError) {
       res.status(err.code === 'DUPLICATE' ? 409 : 404).json({ message: err.message });
+      return;
+    }
+    throw err;
+  }
+});
+
+// PUT /api/products/:handle/reviews/mine
+router.put('/:handle/reviews/mine', requireAuth, async (req: Request, res: Response) => {
+  const parsed = createSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ message: parsed.error.issues[0]?.message ?? 'Invalid request' });
+    return;
+  }
+  try {
+    const review = await updateOwnReview(req.params.handle as string, req.user!.id, parsed.data);
+    res.json({ review });
+  } catch (err) {
+    if (err instanceof ReviewError) {
+      res.status(404).json({ message: err.message });
+      return;
+    }
+    throw err;
+  }
+});
+
+// DELETE /api/products/:handle/reviews/mine
+router.delete('/:handle/reviews/mine', requireAuth, async (req: Request, res: Response) => {
+  try {
+    await deleteOwnReview(req.params.handle as string, req.user!.id);
+    res.json({ success: true });
+  } catch (err) {
+    if (err instanceof ReviewError) {
+      res.status(404).json({ message: err.message });
       return;
     }
     throw err;
