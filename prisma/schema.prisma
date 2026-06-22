@@ -213,13 +213,13 @@ model Coupon {
 }
 
 model DeviceToken {
-  id            Int      @id @default(autoincrement())
-  customerEmail String
-  customer      Customer @relation(fields: [customerEmail], references: [email], onDelete: Cascade)
-  fcmToken      String   @unique
+  id            Int       @id @default(autoincrement())
+  customerEmail String?
+  customer      Customer? @relation(fields: [customerEmail], references: [email], onDelete: Cascade)
+  fcmToken      String    @unique
   deviceType    String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
   @@index([customerEmail])
 }
