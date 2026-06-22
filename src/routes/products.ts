@@ -20,6 +20,8 @@ const PRODUCT_LIST_SELECT = {
   compareAtPrice: true,
   currencyCode: true,
   images: true,
+  avgRating: true,
+  reviewCount: true,
   createdAt: true,
 };
 
@@ -60,7 +62,8 @@ async function listByCategory(category: string, page: number, limit: number, sor
   const [products, countRows] = await Promise.all([
     prisma.$queryRaw<unknown[]>`
       SELECT id, title, handle, vendor, "productType", tags, "availableForSale",
-             "minPrice", "maxPrice", "compareAtPrice", "currencyCode", images, "createdAt"
+             "minPrice", "maxPrice", "compareAtPrice", "currencyCode", images,
+             "avgRating", "reviewCount", "createdAt"
       FROM "Product"
       WHERE "availableForSale" = true AND ${cond}
       ORDER BY ${orderBy}
