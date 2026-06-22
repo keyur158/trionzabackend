@@ -79,7 +79,7 @@ router.put('/:handle/reviews/mine', requireAuth, async (req: Request, res: Respo
     res.json({ review });
   } catch (err) {
     if (err instanceof ReviewError) {
-      res.status(404).json({ message: err.message });
+      res.status(err.code === 'DUPLICATE' ? 409 : 404).json({ message: err.message });
       return;
     }
     throw err;
@@ -93,7 +93,7 @@ router.delete('/:handle/reviews/mine', requireAuth, async (req: Request, res: Re
     res.json({ success: true });
   } catch (err) {
     if (err instanceof ReviewError) {
-      res.status(404).json({ message: err.message });
+      res.status(err.code === 'DUPLICATE' ? 409 : 404).json({ message: err.message });
       return;
     }
     throw err;
