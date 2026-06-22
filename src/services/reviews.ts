@@ -169,3 +169,33 @@ export async function deleteOwnReview(handle: string, customerId: string): Promi
   await prisma.review.delete({ where: { id: existing.id } });
   await recomputeAggregate(product.id);
 }
+
+export async function listAllReviews(page: number, limit: number) {
+  const reviews = await prisma.review.findMany({
+    orderBy: { createdAt: 'desc' },
+    skip: (page - 1) * limit,
+    take: limit + 1,
+    select: {
+      id: true, rating: true, title: true, body: true,
+      authorName: true, status: true, createdAt: true,
+      product: { select: { handle: true, title: true } },
+    },
+  });
+  const hasMore = reviews.length > limit;
+  return { reviews: hasMore ? reviews.slice(0, limit) : reviews, page, hasMore };
+}
+
+export async function setReviewStatus(id: string, status: 'published' | 'hidden') {
+  const existing = await prisma.review.findUnique({ where: { id }, select: { productId: true } });
+  if (!existing) throw new ReviewError('NOT_FOUND', 'Review not found');
+  const review = await prisma.review.update({ where: { id }, data: { status } });
+  await recomputeAggregate(existing.productId);
+  return review;
+}
+
+export async function adminDeleteReview(id: string): Promise<void> {
+  const existing = await prisma.review.findUnique({ where: { id }, select: { productId: true } });
+  if (!existing) throw new ReviewError('NOT_FOUND', 'Review not found');
+  await prisma.review.delete({ where: { id } });
+  await recomputeAggregate(existing.productId);
+}

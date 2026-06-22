@@ -24,6 +24,7 @@ import appVersionRoutes from './routes/appVersion';
 import adminAppVersionRoutes from './routes/adminAppVersions';
 import adminNotificationRoutes from './routes/adminNotifications';
 import adminStatsRoutes from './routes/adminStats';
+import adminReviewRoutes from './routes/adminReviews';
 
 const app = express();
 
@@ -49,6 +50,7 @@ app.use('/api/app', appVersionRoutes);
 app.use('/api/admin/app-versions', adminAppVersionRoutes);
 app.use('/api/admin/notifications', adminNotificationRoutes);
 app.use('/api/admin/stats', adminStatsRoutes);
+app.use('/api/admin/reviews', adminReviewRoutes);
 app.use('/webhooks', webhookRoutes);
 
 app.get('/api/health', async (_req, res) => {
