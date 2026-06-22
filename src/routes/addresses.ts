@@ -14,8 +14,8 @@ router.get('/', requireAuth, async (req: Request, res: Response) => {
 
 router.post('/', requireAuth, async (req: Request, res: Response) => {
   const { firstName, lastName, address1, address2, city, province, country, zip, phone } = req.body;
-  if (!address1 || !city || !country || !zip) {
-    res.status(400).json({ message: 'address1, city, country, and zip are required' });
+  if (!address1 || !city || !country || !zip || !phone) {
+    res.status(400).json({ message: 'address1, city, country, zip, and phone are required' });
     return;
   }
   const existingCount = await prisma.address.count({ where: { customerId: req.user!.id } });
