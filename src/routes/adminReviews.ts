@@ -30,7 +30,7 @@ router.patch('/:id', async (req: Request, res: Response) => {
     const review = await setReviewStatus(req.params.id as string, status);
     res.json({ review });
   } catch (err) {
-    if (err instanceof ReviewError) {
+    if (err instanceof ReviewError && err.code === 'NOT_FOUND') {
       res.status(404).json({ message: err.message });
       return;
     }
@@ -44,7 +44,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
     await adminDeleteReview(req.params.id as string);
     res.json({ success: true });
   } catch (err) {
-    if (err instanceof ReviewError) {
+    if (err instanceof ReviewError && err.code === 'NOT_FOUND') {
       res.status(404).json({ message: err.message });
       return;
     }

@@ -39,6 +39,18 @@ describe('GET /api/admin/reviews', () => {
     expect(res.body.reviews).toHaveLength(1);
     expect(mockList).toHaveBeenCalledWith(1, 20);
   });
+
+  it('clamps an oversized limit to 50', async () => {
+    mockList.mockResolvedValue({ reviews: [], page: 1, hasMore: false });
+    await request(app).get('/api/admin/reviews?limit=100');
+    expect(mockList).toHaveBeenCalledWith(1, 50);
+  });
+
+  it('floors page below 1 to 1 with default limit', async () => {
+    mockList.mockResolvedValue({ reviews: [], page: 1, hasMore: false });
+    await request(app).get('/api/admin/reviews?page=0');
+    expect(mockList).toHaveBeenCalledWith(1, 20);
+  });
 });
 
 describe('PATCH /api/admin/reviews/:id', () => {
