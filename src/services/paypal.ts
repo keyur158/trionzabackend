@@ -5,14 +5,33 @@ const PAYPAL_BASE = env.PAYPAL_MODE === 'live'
   ? 'https://api-m.paypal.com'
   : 'https://api-m.sandbox.paypal.com';
 
+// Surface PayPal's actual error body (status + payload) instead of the opaque
+// "AxiosError: Request failed with status code 401" that String(err) produces.
+function logPayPalError(context: string, err: unknown): void {
+  if (axios.isAxiosError(err)) {
+    console.error(
+      `[paypal] ${context} failed (mode=${env.PAYPAL_MODE}, base=${PAYPAL_BASE}) ` +
+      `status=${err.response?.status}`,
+      JSON.stringify(err.response?.data ?? err.message)
+    );
+  } else {
+    console.error(`[paypal] ${context} failed:`, err);
+  }
+}
+
 async function getAccessToken(): Promise<string> {
   const auth = Buffer.from(`${env.PAYPAL_CLIENT_ID}:${env.PAYPAL_SECRET}`).toString('base64');
-  const res = await axios.post(
-    `${PAYPAL_BASE}/v1/oauth2/token`,
-    'grant_type=client_credentials',
-    { headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' } }
-  );
-  return res.data.access_token as string;
+  try {
+    const res = await axios.post(
+      `${PAYPAL_BASE}/v1/oauth2/token`,
+      'grant_type=client_credentials',
+      { headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' } }
+    );
+    return res.data.access_token as string;
+  } catch (err) {
+    logPayPalError('oauth2/token', err);
+    throw err;
+  }
 }
 
 export interface PayPalCreateOrderResult {
@@ -27,20 +46,26 @@ export async function createPayPalOrder(
   cancelUrl: string
 ): Promise<PayPalCreateOrderResult> {
   const token = await getAccessToken();
-  const res = await axios.post(
-    `${PAYPAL_BASE}/v2/checkout/orders`,
-    {
-      intent: 'CAPTURE',
-      purchase_units: [{ amount: { currency_code: currency, value: amount } }],
-      application_context: {
-        return_url: returnUrl,
-        cancel_url: cancelUrl,
-        user_action: 'PAY_NOW',
-        shipping_preference: 'NO_SHIPPING',
+  let res;
+  try {
+    res = await axios.post(
+      `${PAYPAL_BASE}/v2/checkout/orders`,
+      {
+        intent: 'CAPTURE',
+        purchase_units: [{ amount: { currency_code: currency, value: amount } }],
+        application_context: {
+          return_url: returnUrl,
+          cancel_url: cancelUrl,
+          user_action: 'PAY_NOW',
+          shipping_preference: 'NO_SHIPPING',
+        },
       },
-    },
-    { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } }
-  );
+      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } }
+    );
+  } catch (err) {
+    logPayPalError('v2/checkout/orders', err);
+    throw err;
+  }
   const links: Array<{ rel: string; href: string }> = res.data.links ?? [];
   const approve = links.find((l) => l.rel === 'approve' || l.rel === 'payer-action');
   if (!approve) throw new Error('PayPal approval link missing');
