@@ -12,9 +12,8 @@ async function main() {
 
   await prisma.shippingRate.createMany({
     data: [
-      { name: 'Standard Shipping', price: 5.00, minDays: 5, maxDays: 7, countryCodes: [], isActive: true },
-      { name: 'Express Shipping', price: 12.00, minDays: 2, maxDays: 3, countryCodes: [], isActive: true },
-      { name: 'Free Shipping', price: 0.00, minDays: 7, maxDays: 10, countryCodes: [], minOrderValue: 50.00, isActive: true },
+      { name: 'Express Shipping', price: 45.00, minDays: 5, maxDays: 7, countryCodes: [], isActive: true },
+      { name: 'Free Shipping', price: 0.00, minDays: 7, maxDays: 9, countryCodes: [], isActive: true },
     ],
   });
   console.log('Shipping rates seeded successfully.');
