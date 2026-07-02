@@ -13,7 +13,10 @@ export function verifyShopifyWebhook(req: Request, res: Response, next: NextFunc
     .createHmac('sha256', env.SHOPIFY_WEBHOOK_SECRET)
     .update(body)
     .digest('base64');
-  if (!crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(hmac))) {
+  const digestBuf = Buffer.from(digest);
+  const hmacBuf = Buffer.from(hmac);
+  // timingSafeEqual throws on length mismatch — reject malformed headers first.
+  if (digestBuf.length !== hmacBuf.length || !crypto.timingSafeEqual(digestBuf, hmacBuf)) {
     res.status(401).send('Invalid HMAC');
     return;
   }

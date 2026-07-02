@@ -82,35 +82,62 @@ export async function upsertProduct(payload: ShopifyProductWebhook): Promise<voi
       },
     });
 
-    await tx.productVariant.deleteMany({ where: { productId } });
-
-    if (payload.variants.length > 0) {
-      await tx.productVariant.createMany({
-        data: payload.variants.map(v => {
-          const opts = [
-            v.option1 ? { name: 'Option 1', value: v.option1 } : null,
-            v.option2 ? { name: 'Option 2', value: v.option2 } : null,
-            v.option3 ? { name: 'Option 3', value: v.option3 } : null,
-          ].filter(Boolean);
-          return {
-            id: v.id.toString(),
-            productId,
-            title: v.title,
-            price: parseFloat(v.price),
-            compareAtPrice: v.compare_at_price ? parseFloat(v.compare_at_price) : null,
-            currencyCode: 'USD',
-            availableForSale: v.available,
-            sku: v.sku ?? null,
-            inventoryQty: v.inventory_quantity ?? 0,
-            selectedOptions: opts,
-            imageUrl: null,
-          };
-        }),
+    // Upsert variants in place — delete-and-recreate fails when a variant is
+    // referenced by a CartItem (FK Restrict), which dropped the whole update.
+    for (const v of payload.variants) {
+      const opts = [
+        v.option1 ? { name: 'Option 1', value: v.option1 } : null,
+        v.option2 ? { name: 'Option 2', value: v.option2 } : null,
+        v.option3 ? { name: 'Option 3', value: v.option3 } : null,
+      ].filter(Boolean);
+      const data = {
+        title: v.title,
+        price: parseFloat(v.price),
+        compareAtPrice: v.compare_at_price ? parseFloat(v.compare_at_price) : null,
+        currencyCode: 'USD',
+        availableForSale: v.available,
+        sku: v.sku ?? null,
+        inventoryQty: v.inventory_quantity ?? 0,
+        selectedOptions: opts,
+        imageUrl: null,
+      };
+      await tx.productVariant.upsert({
+        where: { id: v.id.toString() },
+        create: { id: v.id.toString(), productId, ...data },
+        update: data,
       });
     }
   });
+
+  // Remove variants no longer present in the payload. Done outside the
+  // transaction: a FK-violating delete would abort the whole transaction in
+  // Postgres. If a variant sits in someone's cart (FK Restrict), keep the row
+  // but mark it unavailable instead of failing the update.
+  const incomingIds = payload.variants.map(v => v.id.toString());
+  const staleVariants = await prisma.productVariant.findMany({
+    where: { productId, id: { notIn: incomingIds } },
+    select: { id: true },
+  });
+  for (const { id } of staleVariants) {
+    try {
+      await prisma.productVariant.delete({ where: { id } });
+    } catch {
+      await prisma.productVariant.update({ where: { id }, data: { availableForSale: false } });
+    }
+  }
 }
 
 export async function deleteProduct(id: string): Promise<void> {
-  await prisma.product.delete({ where: { id } }).catch(() => {});
+  try {
+    await prisma.product.delete({ where: { id } });
+  } catch (err: any) {
+    // Already gone locally — nothing to do.
+    if (err?.code === 'P2025') return;
+    // A variant is in someone's cart (FK Restrict), so the delete is blocked.
+    // Mark the product and its variants unavailable so it can't be purchased.
+    await prisma.$transaction([
+      prisma.product.update({ where: { id }, data: { availableForSale: false } }),
+      prisma.productVariant.updateMany({ where: { productId: id }, data: { availableForSale: false } }),
+    ]);
+  }
 }

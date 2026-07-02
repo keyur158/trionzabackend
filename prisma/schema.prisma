@@ -163,6 +163,9 @@ model Payment {
   order         Order    @relation(fields: [orderId], references: [id])
   paymentMethod String
   paymentId     String
+  // PayPal order id from create-paypal-order; unique so /create-order retries
+  // can be detected instead of re-capturing an already-captured payment.
+  paypalOrderId String?  @unique
   status        String
   amount        Decimal  @db.Decimal(10, 2)
   currency      String   @default("USD")

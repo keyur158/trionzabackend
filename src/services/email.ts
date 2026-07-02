@@ -46,6 +46,7 @@ async function sendEmail(opts: SendEmailOptions): Promise<boolean> {
           : `Zoho-enczapikey ${env.ZEPTOMAIL_TOKEN}`,
         'Content-Type': 'application/json',
       },
+      timeout: 15000,
     }
   );
   return true;

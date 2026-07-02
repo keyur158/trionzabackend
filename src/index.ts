@@ -5,6 +5,7 @@ dotenv.config();
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 import { prisma } from './config/database';
 import { env } from './config/env';
 import { syncAll } from './services/shopify-sync';
@@ -28,12 +29,28 @@ import adminReviewRoutes from './routes/adminReviews';
 
 const app = express();
 
+// Behind Nginx — trust the first proxy hop so req.ip is the real client IP.
+app.set('trust proxy', 1);
+
 // Webhooks need the raw body for HMAC verification
 app.use('/webhooks', express.raw({ type: 'application/json' }));
 app.use(express.json());
 app.use(helmet());
 app.use(cors());
 app.use((req, _res, next) => { console.log(`${req.method} ${req.path}`); next(); });
+
+// Rate limits — generous enough that legitimate users never hit them.
+// Scoped to /api so Shopify webhook bursts are never throttled.
+const limiterDefaults = { standardHeaders: true as const, legacyHeaders: false };
+const globalLimiter = rateLimit({ ...limiterDefaults, windowMs: 15 * 60 * 1000, limit: 600 });
+const requestOtpLimiter = rateLimit({ ...limiterDefaults, windowMs: 15 * 60 * 1000, limit: 10 });
+const verifyOtpLimiter = rateLimit({ ...limiterDefaults, windowMs: 15 * 60 * 1000, limit: 30 });
+const inquiryLimiter = rateLimit({ ...limiterDefaults, windowMs: 60 * 60 * 1000, limit: 5 });
+
+app.use('/api', globalLimiter);
+app.use('/api/auth/request-otp', requestOtpLimiter);
+app.use('/api/auth/verify-otp', verifyOtpLimiter);
+app.use('/api/inquiries', inquiryLimiter);
 
 app.use('/api/auth', authRoutes);
 app.use('/api/products', productRoutes);
@@ -64,11 +81,15 @@ app.get('/api/health', async (_req, res) => {
 
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error('[uncaught]', err?.message || err);
-  res.status(err?.status || 500).json({ message: err?.message || 'Internal server error' });
+  const message = process.env.NODE_ENV !== 'production'
+    ? (err?.message || 'Internal server error')
+    : 'Internal server error';
+  res.status(err?.status || 500).json({ message });
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+let syncTimer: NodeJS.Timeout | undefined;
+const server = app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 
   // Run an initial sync on startup, then repeat on the configured interval.
@@ -81,5 +102,24 @@ app.listen(PORT, () => {
   };
 
   runSync();
-  setInterval(runSync, intervalMs);
+  syncTimer = setInterval(runSync, intervalMs);
 });
+
+function shutdown(signal: string): void {
+  console.log(`${signal} received — shutting down gracefully...`);
+  if (syncTimer) clearInterval(syncTimer);
+  // Hard-exit fallback in case close() hangs on open connections.
+  const forceExit = setTimeout(() => {
+    console.error('Graceful shutdown timed out — forcing exit');
+    process.exit(1);
+  }, 10000);
+  forceExit.unref();
+  server.close(() => {
+    prisma.$disconnect()
+      .catch(err => console.error('Error disconnecting Prisma:', err))
+      .finally(() => process.exit(0));
+  });
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));

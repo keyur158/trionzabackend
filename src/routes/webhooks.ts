@@ -51,6 +51,26 @@ router.post('/', verifyShopifyWebhook, async (req: Request, res: Response) => {
         break;
       }
 
+      case 'fulfillment_events/create': {
+        // Carrier tracking event; only final delivery matters here.
+        if (payload.status !== 'delivered') break;
+        const order = await prisma.order.findFirst({
+          where: { shopifyOrderId: String(payload.order_id) },
+          include: { customer: { include: { deviceTokens: true } } },
+        });
+        if (!order) {
+          console.log(`fulfillment_events/create: no local order for ${payload.order_id}`);
+          break;
+        }
+        await prisma.order.update({
+          where: { id: order.id },
+          data: { fulfillmentStatus: 'delivered', shopifyUpdatedAt: new Date() },
+        });
+        const tokens = order.customer.deviceTokens.map(dt => dt.fcmToken);
+        if (tokens.length > 0) await sendOrderPush(tokens, 'delivered', order.orderNumber);
+        break;
+      }
+
       case 'customers/create':
         // Customer sync is handled server-side during signup
         break;
@@ -60,6 +80,13 @@ router.post('/', verifyShopifyWebhook, async (req: Request, res: Response) => {
     }
   } catch (err) {
     console.error(`Webhook handler error [${topic}]:`, err);
+    // Processing failed — remove the dedup row (best-effort) so Shopify's
+    // automatic retry of this event is not treated as a duplicate and lost.
+    try {
+      await prisma.webhookEvent.delete({ where: { eventId } });
+    } catch (cleanupErr) {
+      console.error(`Failed to remove dedup row for webhook ${eventId}:`, cleanupErr);
+    }
   }
 });
 

@@ -151,6 +151,30 @@ router.post('/create-order', requireAuth, async (req: Request, res: Response) =>
     return;
   }
 
+  // Idempotency: if this PayPal order was already captured and recorded (e.g. the
+  // client retried after a network drop), return the existing order instead of
+  // attempting a second capture — a retry must never double-charge or dead-end.
+  const existingPayment = await prisma.payment.findUnique({
+    where: { paypalOrderId: String(paypalOrderId) },
+    include: { order: true },
+  });
+  if (existingPayment) {
+    if (existingPayment.order.customerId !== req.user!.id) {
+      res.status(409).json({ message: 'Payment already used' });
+      return;
+    }
+    res.json({
+      success: true,
+      order: {
+        id: existingPayment.order.id,
+        orderNumber: existingPayment.order.orderNumber,
+        totalPrice: existingPayment.order.totalPrice,
+        financialStatus: existingPayment.order.financialStatus,
+      },
+    });
+    return;
+  }
+
   const customer = await prisma.customer.findUnique({
     where: { id: req.user!.id },
     include: { deviceTokens: true },
@@ -232,6 +256,65 @@ router.post('/create-order', requireAuth, async (req: Request, res: Response) =>
     phone: address.phone,
   };
 
+  // Persist the order + payment IMMEDIATELY after capture, before any Shopify
+  // call — the money has moved, so the record must survive whatever fails next.
+  // Timestamp-based fallback number: unique under concurrency (the old
+  // count-based `APP-${1001 + count}` could collide); it is replaced by the
+  // real Shopify order number below whenever Shopify order creation succeeds.
+  let orderNumber = `APP-${Date.now()}`;
+
+  let order;
+  try {
+    order = await prisma.$transaction(async (tx) => {
+      const created = await tx.order.create({
+        data: {
+          orderNumber,
+          customerId: customer.id,
+          customerEmail: customer.email,
+          lineItems: lineItemsData,
+          subtotalPrice: totals.subtotal,
+          totalShipping: totals.shipping,
+          totalDiscount: totals.discount,
+          totalTax: totals.tax,
+          totalPrice: totals.total,
+          currencyCode: 'USD',
+          financialStatus: 'paid',
+          fulfillmentStatus: 'unfulfilled',
+          shippingAddress: shippingAddressJson,
+          couponCode: couponCode ?? null,
+        },
+      });
+      await tx.payment.create({
+        data: {
+          orderId: created.id,
+          paymentMethod: 'paypal',
+          paymentId: paypalResult.transactionId,
+          paypalOrderId: String(paypalOrderId),
+          status: 'completed',
+          amount: totals.total,
+          currency: 'USD',
+          rawResponse: paypalResult.raw as never,
+        },
+      });
+      await tx.cartItem.deleteMany({ where: { cartId: fullCart!.id! } });
+      if (coupon) {
+        await tx.coupon.update({ where: { id: coupon.id }, data: { usedCount: { increment: 1 } } });
+      }
+      return created;
+    });
+  } catch (err) {
+    // Captured but not recorded — the one remaining bad window. Log everything
+    // needed to reconcile manually; the client must NOT retry capture.
+    console.error(
+      `CRITICAL: PayPal captured but order persistence failed. paypalOrderId=${paypalOrderId} transactionId=${paypalResult.transactionId} customer=${customer.email}`,
+      err
+    );
+    res.status(500).json({
+      message: 'Your payment was received but the order could not be finalized. Please contact support — do not pay again.',
+    });
+    return;
+  }
+
   // Resolve Shopify customer ID before creating the Shopify order
   let shopifyCustomerId = customer.shopifyCustomerId;
   if (!shopifyCustomerId) {
@@ -251,7 +334,8 @@ router.post('/create-order', requireAuth, async (req: Request, res: Response) =>
     }
   }
 
-  // Create Shopify order synchronously so we get the real order number (#1001, #1002 …)
+  // Create the Shopify order so we get the real order number (#1001, #1002 …);
+  // on success, upgrade the locally persisted order with the real identifiers.
   let shopifyOrderResult: { id: string; name: string } | null = null;
   if (shopifyCustomerId) {
     try {
@@ -268,54 +352,22 @@ router.post('/create-order', requireAuth, async (req: Request, res: Response) =>
     }
   }
 
-  let orderNumber: string;
   if (shopifyOrderResult?.name) {
-    orderNumber = shopifyOrderResult.name.replace('#', '');
-  } else {
-    const orderCount = await prisma.order.count();
-    orderNumber = `APP-${1001 + orderCount}`;
-  }
-
-  const order = await prisma.$transaction(async (tx) => {
-    const created = await tx.order.create({
-      data: {
-        orderNumber,
-        customerId: customer.id,
-        customerEmail: customer.email,
-        lineItems: lineItemsData,
-        subtotalPrice: totals.subtotal,
-        totalShipping: totals.shipping,
-        totalDiscount: totals.discount,
-        totalTax: totals.tax,
-        totalPrice: totals.total,
-        currencyCode: 'USD',
-        financialStatus: 'paid',
-        fulfillmentStatus: 'unfulfilled',
-        shippingAddress: shippingAddressJson,
-        couponCode: couponCode ?? null,
-        ...(shopifyOrderResult && {
+    try {
+      orderNumber = shopifyOrderResult.name.replace('#', '');
+      order = await prisma.order.update({
+        where: { id: order.id },
+        data: {
+          orderNumber,
           shopifyOrderId: shopifyOrderResult.id.split('/').pop(),
           shopifyCreatedAt: new Date(),
-        }),
-      },
-    });
-    await tx.payment.create({
-      data: {
-        orderId: created.id,
-        paymentMethod: 'paypal',
-        paymentId: paypalResult.transactionId,
-        status: 'completed',
-        amount: totals.total,
-        currency: 'USD',
-        rawResponse: paypalResult.raw as never,
-      },
-    });
-    await tx.cartItem.deleteMany({ where: { cartId: fullCart!.id! } });
-    if (coupon) {
-      await tx.coupon.update({ where: { id: coupon.id }, data: { usedCount: { increment: 1 } } });
+        },
+      });
+    } catch (err) {
+      // Order + payment are already safe; worst case it keeps the APP- number.
+      console.error('Failed to attach Shopify order details:', err);
     }
-    return created;
-  });
+  }
 
   res.json({ success: true, order: { id: order.id, orderNumber: order.orderNumber, totalPrice: order.totalPrice, financialStatus: order.financialStatus } });
 
@@ -329,9 +381,11 @@ router.post('/create-order', requireAuth, async (req: Request, res: Response) =>
   });
 });
 
-// TEST ONLY — bypasses PayPal, still syncs order to Shopify. Disabled in production.
+// TEST ONLY — bypasses PayPal, still syncs order to Shopify. Requires an explicit
+// ENABLE_TEST_CHECKOUT=true opt-in (NODE_ENV alone is too easy to leave unset in
+// prod, which would silently expose a free-order endpoint) and never runs in production.
 router.post('/create-order-test', requireAuth, async (req: Request, res: Response) => {
-  if (process.env.NODE_ENV === 'production') {
+  if (process.env.NODE_ENV === 'production' || process.env.ENABLE_TEST_CHECKOUT !== 'true') {
     res.status(404).json({ message: 'Not found' });
     return;
   }
@@ -436,8 +490,8 @@ router.post('/create-order-test', requireAuth, async (req: Request, res: Respons
   if (shopifyOrderResultTest?.name) {
     orderNumber = shopifyOrderResultTest.name.replace('#', '');
   } else {
-    const orderCount = await prisma.order.count();
-    orderNumber = `APP-${1001 + orderCount}`;
+    // Timestamp-based: unique under concurrency, unlike the old count-based scheme.
+    orderNumber = `APP-${Date.now()}`;
   }
 
   const order = await prisma.$transaction(async (tx) => {

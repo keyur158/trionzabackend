@@ -25,7 +25,7 @@ async function getAccessToken(): Promise<string> {
     const res = await axios.post(
       `${PAYPAL_BASE}/v1/oauth2/token`,
       'grant_type=client_credentials',
-      { headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' } }
+      { headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 20000 }
     );
     return res.data.access_token as string;
   } catch (err) {
@@ -60,7 +60,7 @@ export async function createPayPalOrder(
           shipping_preference: 'NO_SHIPPING',
         },
       },
-      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } }
+      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 20000 }
     );
   } catch (err) {
     logPayPalError('v2/checkout/orders', err);
@@ -84,7 +84,7 @@ export async function capturePayPalPayment(paypalOrderId: string): Promise<PayPa
   const res = await axios.post(
     `${PAYPAL_BASE}/v2/checkout/orders/${paypalOrderId}/capture`,
     {},
-    { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } }
+    { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 20000 }
   );
   const capture = res.data.purchase_units[0].payments.captures[0];
   return {

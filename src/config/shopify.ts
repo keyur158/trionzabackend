@@ -18,7 +18,7 @@ async function getAccessToken(): Promise<string> {
       client_secret: env.SHOPIFY_CLIENT_SECRET,
       grant_type: 'client_credentials',
     },
-    { headers: { 'Content-Type': 'application/json' } }
+    { headers: { 'Content-Type': 'application/json' }, timeout: 30000 }
   );
 
   cachedToken = res.data.access_token as string;
@@ -35,6 +35,7 @@ export const shopifyGraphQL = async (query: string, variables?: Record<string, u
         'X-Shopify-Access-Token': token,
         'Content-Type': 'application/json',
       },
+      timeout: 30000,
     }
   );
   return response.data;
@@ -44,6 +45,7 @@ export async function shopifyRestGet(path: string) {
   const token = await getAccessToken();
   return axios.get(`${shopifyApiBase}${path}`, {
     headers: { 'X-Shopify-Access-Token': token },
+    timeout: 30000,
   });
 }
 
@@ -58,6 +60,7 @@ export const shopifyStorefrontGraphQL = async (query: string, variables?: Record
         'X-Shopify-Storefront-Access-Token': env.SHOPIFY_STOREFRONT_ACCESS_TOKEN,
         'Content-Type': 'application/json',
       },
+      timeout: 30000,
     }
   );
   return response.data;
