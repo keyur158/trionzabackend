@@ -6,7 +6,8 @@ import { Prisma } from '../generated/prisma/client';
 const router = Router();
 const cache = new NodeCache({ stdTTL: 300 }); // 5-minute cache
 
-// Fields needed for product cards — no variants (fetched only on detail page)
+// Fields needed for product cards — no variants (fetched only on detail page).
+// metafields power the client-side filter chips (shape/style/category/growth).
 const PRODUCT_LIST_SELECT = {
   id: true,
   title: true,
@@ -20,6 +21,7 @@ const PRODUCT_LIST_SELECT = {
   compareAtPrice: true,
   currencyCode: true,
   images: true,
+  metafields: true,
   avgRating: true,
   reviewCount: true,
   createdAt: true,
@@ -63,7 +65,7 @@ async function listByCategory(category: string, page: number, limit: number, sor
     prisma.$queryRaw<unknown[]>`
       SELECT id, title, handle, vendor, "productType", tags, "availableForSale",
              "minPrice", "maxPrice", "compareAtPrice", "currencyCode", images,
-             "avgRating", "reviewCount", "createdAt"
+             metafields, "avgRating", "reviewCount", "createdAt"
       FROM "Product"
       WHERE "availableForSale" = true AND ${cond}
       ORDER BY ${orderBy}
