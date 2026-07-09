@@ -2,10 +2,11 @@ import { Router, Request, Response } from 'express';
 import NodeCache from 'node-cache';
 import { prisma } from '../config/database';
 import { Prisma } from '../generated/prisma/client';
-import { buildProductWhere, parseFiltersParam } from '../utils/product-query';
+import { buildProductWhere, parseFiltersParam, categoryCondition } from '../utils/product-query';
 
 const router = Router();
 const cache = new NodeCache({ stdTTL: 300 }); // 5-minute cache
+const facetsCache = new NodeCache({ stdTTL: 60 });
 
 // Fields needed for product cards — no variants (fetched only on detail page).
 // metafields power the client-side filter chips (shape/style/category/growth).
@@ -126,6 +127,93 @@ router.get('/', async (req: Request, res: Response) => {
 
   const result = { products, total, page, limit, pages: Math.ceil(total / limit) };
   cache.set(cacheKey, result);
+  res.json(result);
+});
+
+const GROWTH_CATEGORIES = ['lab-grown', 'moissanite', 'natural', 'gemstone', 'other'] as const;
+
+router.get('/facets', async (req: Request, res: Response) => {
+  const category = req.query.category as string | undefined;
+  const filters = parseFiltersParam(req.query.filters);
+  const minPriceRaw = parseFloat(req.query.minPrice as string);
+  const maxPriceRaw = parseFloat(req.query.maxPrice as string);
+  const minPrice = Number.isFinite(minPriceRaw) ? minPriceRaw : undefined;
+  const maxPrice = Number.isFinite(maxPriceRaw) ? maxPriceRaw : undefined;
+
+  const cacheKey = `facets:${category || ''}:${(req.query.filters as string) || ''}:${minPrice ?? ''}:${maxPrice ?? ''}`;
+  const cached = facetsCache.get(cacheKey);
+  if (cached) {
+    res.json(cached);
+    return;
+  }
+
+  const base = { category, filters, minPrice, maxPrice };
+
+  // total: everything applied
+  const totalRows = await prisma.$queryRaw<Array<{ count: number }>>`
+    SELECT COUNT(*)::int AS count FROM "Product" WHERE ${buildProductWhere(base)}`;
+
+  // price bounds: everything except the price selection itself
+  const priceRows = await prisma.$queryRaw<Array<{ min: number | null; max: number | null }>>`
+    SELECT MIN("minPrice")::float AS min, MAX("minPrice")::float AS max
+    FROM "Product" WHERE ${buildProductWhere({ category, filters })}`;
+
+  // growth type counts: everything except the category selection
+  const noCategoryWhere = buildProductWhere({ filters, minPrice, maxPrice });
+  const growthRows = await prisma.$queryRaw<Array<Record<string, number>>>`
+    SELECT
+      COUNT(*) FILTER (WHERE ${categoryCondition('lab-grown')!})::int  AS "labGrown",
+      COUNT(*) FILTER (WHERE ${categoryCondition('moissanite')!})::int AS "moissanite",
+      COUNT(*) FILTER (WHERE ${categoryCondition('natural')!})::int    AS "natural",
+      COUNT(*) FILTER (WHERE ${categoryCondition('gemstone')!})::int   AS "gemstone",
+      COUNT(*) FILTER (WHERE ${categoryCondition('other')!})::int      AS "other"
+    FROM "Product" WHERE ${noCategoryWhere}`;
+  const g = growthRows[0] ?? {};
+  const growthKeyMap: Record<string, string> = {
+    labGrown: 'lab-grown', moissanite: 'moissanite', natural: 'natural',
+    gemstone: 'gemstone', other: 'other',
+  };
+  const growthTypes: Record<string, number> = {};
+  for (const [col, key] of Object.entries(growthKeyMap)) {
+    if ((g[col] ?? 0) > 0) growthTypes[key] = g[col];
+  }
+
+  // which metafield keys exist in this category scope (cap: 20 facet sections)
+  const keyRows = await prisma.$queryRaw<Array<{ key: string }>>`
+    SELECT DISTINCT jsonb_object_keys(metafields) AS key
+    FROM "Product" WHERE ${buildProductWhere({ category })} LIMIT 20`;
+
+  const facets: Record<string, Array<{ value: string; count: number }>> = {};
+  for (const { key } of keyRows) {
+    if (key === 'growth_type') continue; // tabs own growth type
+    // counts for this section exclude its own selection (standard faceting)
+    const otherFilters = { ...(filters ?? {}) };
+    delete otherFilters[key];
+    const sectionWhere = buildProductWhere({
+      category,
+      filters: Object.keys(otherFilters).length > 0 ? otherFilters : undefined,
+      minPrice,
+      maxPrice,
+    });
+    const rows = await prisma.$queryRaw<Array<{ value: string; count: number }>>`
+      SELECT v.value AS value, COUNT(*)::int AS count
+      FROM "Product",
+           jsonb_array_elements_text(
+             CASE WHEN jsonb_typeof(metafields->${key}) = 'array'
+                  THEN metafields->${key} ELSE '[]'::jsonb END) v(value)
+      WHERE ${sectionWhere}
+      GROUP BY v.value
+      ORDER BY count DESC, v.value ASC`;
+    if (rows.length > 0) facets[key] = rows;
+  }
+
+  const result = {
+    total: totalRows[0]?.count ?? 0,
+    priceRange: { min: priceRows[0]?.min ?? null, max: priceRows[0]?.max ?? null },
+    growthTypes,
+    facets,
+  };
+  facetsCache.set(cacheKey, result);
   res.json(result);
 });
 
