@@ -1,5 +1,6 @@
 import { shopifyGraphQL } from '../config/shopify';
 import { prisma } from '../config/database';
+import { ValidatedDiscount } from './shopify-discount';
 
 interface ShopifyLineItem {
   variantId: string;
@@ -25,6 +26,7 @@ interface CreateShopifyOrderInput {
   shippingAddress: ShopifyAddress;
   totalPrice: string;
   paypalTransactionId: string;
+  discount?: ValidatedDiscount | null;
 }
 
 export async function createShopifyOrder(data: CreateShopifyOrderInput): Promise<{ id: string; name: string } | null> {
@@ -58,6 +60,31 @@ export async function createShopifyOrder(data: CreateShopifyOrderInput): Promise
       },
       tags: ['mobile-app', 'paypal'],
       note: `PayPal: ${data.paypalTransactionId}`,
+      ...(data.discount && {
+        discountCode:
+          data.discount.discountType === 'percentage'
+            ? {
+                itemPercentageDiscountCode: {
+                  code: data.discount.code,
+                  percentage: data.discount.discountValue,
+                },
+              }
+            : {
+                itemFixedDiscountCode: {
+                  code: data.discount.code,
+                  amountSet: {
+                    shopMoney: {
+                      amount: data.discount.discountValue.toFixed(2),
+                      currencyCode: 'USD',
+                    },
+                    presentmentMoney: {
+                      amount: data.discount.discountValue.toFixed(2),
+                      currencyCode: 'USD',
+                    },
+                  },
+                },
+              },
+      }),
       transactions: [{
         kind: 'SALE',
         status: 'SUCCESS',
