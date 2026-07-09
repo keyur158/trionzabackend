@@ -316,7 +316,16 @@ export async function syncProducts(): Promise<number> {
   let cursor: string | null = null;
   let total = 0;
 
-  const catalog = await buildMetaobjectCatalog();
+  // A transient throw while building the catalog must not abort the whole sync.
+  // Fall back to an empty catalog — the empty-catalog path below preserves
+  // existing product metafields and keeps products syncing.
+  let catalog: MetaobjectCatalog;
+  try {
+    catalog = await buildMetaobjectCatalog();
+  } catch (err) {
+    console.error('[sync] Metaobject catalog build failed — proceeding with an empty catalog:', err);
+    catalog = { labelByGid: new Map(), entriesByType: new Map() };
+  }
   console.log(`[sync] Loaded ${catalog.labelByGid.size} metaobject labels across ${catalog.entriesByType.size} types`);
   if (catalog.labelByGid.size === 0) {
     console.warn('[sync] Metaobject catalog is EMPTY — preserving existing product metafields for this run');

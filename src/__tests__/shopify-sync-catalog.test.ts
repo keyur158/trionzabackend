@@ -182,6 +182,31 @@ describe('syncProducts with an empty metaobject catalog', () => {
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Metaobject catalog is EMPTY'));
     warnSpy.mockRestore();
   });
+
+  it('survives a thrown catalog build and still syncs products (empty-catalog fallback)', async () => {
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    mockGraphQL
+      // buildMetaobjectCatalog: definitions query REJECTS (transient network throw)
+      .mockRejectedValueOnce(new Error('network down'))
+      // syncProducts: one page of products still processes
+      .mockResolvedValueOnce(
+        productsPage([{ id: 'gid://shopify/Product/1', metafieldValue: 'gid://shopify/Metaobject/999' }])
+      );
+
+    const total = await syncProducts();
+
+    expect(total).toBe(1);
+    expect(upsertProduct).toHaveBeenCalledTimes(1);
+    const payload = (upsertProduct as jest.Mock).mock.calls[0][0];
+    expect(payload.metafields).toBeUndefined();
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Metaobject catalog build failed'),
+      expect.any(Error)
+    );
+    errorSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
 });
 
 import { prisma } from '../config/database';

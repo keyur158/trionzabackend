@@ -27,6 +27,10 @@ interface CreateShopifyOrderInput {
   totalPrice: string;
   paypalTransactionId: string;
   discount?: ValidatedDiscount | null;
+  // The monetary discount actually charged (computeTotals caps a fixed code at
+  // the subtotal). Shopify must receive this capped value, not the raw code
+  // value, or the order can diverge from / be rejected against the PayPal charge.
+  appliedDiscountAmount?: number;
 }
 
 export async function createShopifyOrder(data: CreateShopifyOrderInput): Promise<{ id: string; name: string } | null> {
@@ -74,11 +78,11 @@ export async function createShopifyOrder(data: CreateShopifyOrderInput): Promise
                   code: data.discount.code,
                   amountSet: {
                     shopMoney: {
-                      amount: data.discount.discountValue.toFixed(2),
+                      amount: (data.appliedDiscountAmount ?? data.discount.discountValue).toFixed(2),
                       currencyCode: 'USD',
                     },
                     presentmentMoney: {
-                      amount: data.discount.discountValue.toFixed(2),
+                      amount: (data.appliedDiscountAmount ?? data.discount.discountValue).toFixed(2),
                       currencyCode: 'USD',
                     },
                   },

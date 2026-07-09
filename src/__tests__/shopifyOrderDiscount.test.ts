@@ -56,6 +56,28 @@ describe('createShopifyOrder discount attachment', () => {
     });
   });
 
+  it('caps the fixed amountSet at the applied (subtotal-capped) amount, not the raw code value', async () => {
+    // A $900 fixed code on a $500 subtotal: computeTotals caps the charge at 500,
+    // and that capped amount is what Shopify must receive.
+    await createShopifyOrder({
+      ...baseInput,
+      totalPrice: '20.00',
+      discount: { code: 'FLAT900', discountType: 'fixed', discountValue: 900, minOrderValue: null },
+      appliedDiscountAmount: 500,
+    });
+
+    const variables = mockGraphQL.mock.calls[0][1];
+    expect(variables.order.discountCode).toEqual({
+      itemFixedDiscountCode: {
+        code: 'FLAT900',
+        amountSet: {
+          shopMoney: { amount: '500.00', currencyCode: 'USD' },
+          presentmentMoney: { amount: '500.00', currencyCode: 'USD' },
+        },
+      },
+    });
+  });
+
   it('omits discountCode when no discount is applied', async () => {
     await createShopifyOrder(baseInput);
     const variables = mockGraphQL.mock.calls[0][1];

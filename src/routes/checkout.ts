@@ -360,6 +360,7 @@ router.post('/create-order', requireAuth, async (req: Request, res: Response) =>
         totalPrice: totals.total.toFixed(2),
         paypalTransactionId: paypalResult.transactionId,
         discount,
+        appliedDiscountAmount: totals.discount,
       });
     } catch (err) {
       console.error('Shopify order creation failed:', err);
@@ -492,6 +493,7 @@ router.post('/create-order-test', requireAuth, async (req: Request, res: Respons
         totalPrice: totals.total.toFixed(2),
         paypalTransactionId: `TEST-${Date.now()}`,
         discount,
+        appliedDiscountAmount: totals.discount,
       });
       if (shopifyOrderResultTest) {
         console.log(`[TEST] Shopify order created: ${shopifyOrderResultTest.id}`);
