@@ -20,6 +20,9 @@ jest.mock('../services/shopify-order', () => ({
 jest.mock('../services/push', () => ({
   sendOrderPush: jest.fn().mockResolvedValue(undefined),
 }));
+jest.mock('../services/shopify-sync', () => ({
+  syncSingleProduct: jest.fn(),
+}));
 
 import express from 'express';
 import request from 'supertest';
@@ -28,6 +31,7 @@ import webhookRoutes from '../routes/webhooks';
 import { prisma } from '../config/database';
 import { upsertProduct } from '../services/product-sync';
 import { sendOrderPush } from '../services/push';
+import { syncSingleProduct } from '../services/shopify-sync';
 import { env } from '../config/env';
 
 const mockCreate = prisma.webhookEvent.create as jest.Mock;
@@ -36,6 +40,7 @@ const mockUpsertProduct = upsertProduct as jest.Mock;
 const mockSendPush = sendOrderPush as jest.Mock;
 const mockOrderFindFirst = prisma.order.findFirst as jest.Mock;
 const mockOrderUpdate = prisma.order.update as jest.Mock;
+const mockSyncSingleProduct = syncSingleProduct as jest.Mock;
 
 function buildApp() {
   const app = express();
@@ -122,5 +127,31 @@ describe('POST /webhooks', () => {
     await flushAsync();
     expect(mockUpsertProduct).not.toHaveBeenCalled();
     expect(mockDelete).not.toHaveBeenCalled();
+  });
+});
+
+describe('products/update webhook', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockCreate.mockResolvedValue({});
+    mockDelete.mockResolvedValue({});
+    mockUpsertProduct.mockResolvedValue(undefined);
+  });
+
+  it('re-fetches the product via GraphQL for label resolution', async () => {
+    mockSyncSingleProduct.mockResolvedValue(true);
+    const res = await post(sign(body));
+    expect(res.status).toBe(200);
+    await flushAsync();
+    expect(mockSyncSingleProduct).toHaveBeenCalledWith('123');
+    expect(mockUpsertProduct).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the raw payload when the re-fetch fails', async () => {
+    mockSyncSingleProduct.mockRejectedValue(new Error('shopify down'));
+    const res = await post(sign(body));
+    expect(res.status).toBe(200);
+    await flushAsync();
+    expect(mockUpsertProduct).toHaveBeenCalled();
   });
 });

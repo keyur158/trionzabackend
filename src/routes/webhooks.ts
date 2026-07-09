@@ -4,6 +4,7 @@ import { prisma } from '../config/database';
 import { upsertProduct, deleteProduct } from '../services/product-sync';
 import { updateOrderFromWebhook } from '../services/shopify-order';
 import { sendOrderPush } from '../services/push';
+import { syncSingleProduct } from '../services/shopify-sync';
 
 const router = Router();
 
@@ -26,9 +27,19 @@ router.post('/', verifyShopifyWebhook, async (req: Request, res: Response) => {
   try {
     switch (topic) {
       case 'products/create':
-      case 'products/update':
-        await upsertProduct(payload as never);
+      case 'products/update': {
+        // The webhook payload carries raw metaobject GIDs (no label resolution);
+        // re-fetch via GraphQL so metafield labels stay correct. On failure fall
+        // back to the raw payload — its `metafields` is usually absent, so the
+        // update path leaves existing resolved metafields untouched.
+        try {
+          const found = await syncSingleProduct(String(payload.id));
+          if (!found) await upsertProduct(payload as never);
+        } catch {
+          await upsertProduct(payload as never);
+        }
         break;
+      }
 
       case 'products/delete':
         await deleteProduct(String(payload.id));

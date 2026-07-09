@@ -135,6 +135,68 @@ export async function persistFilterOptions(catalog: MetaobjectCatalog): Promise<
   }
 }
 
+const PRODUCT_BY_ID_QUERY = `
+  query GetProduct($id: ID!) {
+    product(id: $id) {
+      id
+      title
+      handle
+      descriptionHtml
+      vendor
+      productType
+      tags
+      createdAt
+      updatedAt
+      publishedAt
+      images(first: 10) {
+        edges { node { id url } }
+      }
+      variants(first: 100) {
+        edges {
+          node {
+            id
+            title
+            price
+            compareAtPrice
+            availableForSale
+            sku
+            inventoryQuantity
+            selectedOptions { name value }
+            image { url }
+          }
+        }
+      }
+      metafields(first: 25, namespace: "custom") {
+        edges { node { key value } }
+      }
+    }
+  }
+`;
+
+// Webhook bursts must not rebuild the catalog per event; refresh every 10 min.
+let catalogCache: { catalog: MetaobjectCatalog; fetchedAt: number } | null = null;
+const CATALOG_TTL_MS = 10 * 60 * 1000;
+
+async function getCatalogCached(): Promise<MetaobjectCatalog> {
+  if (catalogCache && Date.now() - catalogCache.fetchedAt < CATALOG_TTL_MS) {
+    return catalogCache.catalog;
+  }
+  const catalog = await buildMetaobjectCatalog();
+  catalogCache = { catalog, fetchedAt: Date.now() };
+  return catalog;
+}
+
+export async function syncSingleProduct(productId: string): Promise<boolean> {
+  const catalog = await getCatalogCached();
+  const data = await shopifyGraphQL(PRODUCT_BY_ID_QUERY, {
+    id: `gid://shopify/Product/${productId}`,
+  });
+  const node = data.data?.product;
+  if (!node) return false;
+  await upsertProduct(mapProductNode(node, catalog.labelByGid));
+  return true;
+}
+
 function resolveMetafieldValue(raw: string, map: Map<string, string>): string[] | null {
   // List of metaobject references: JSON array string
   if (raw.startsWith('[')) {
