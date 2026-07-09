@@ -1,5 +1,5 @@
 import { prisma } from '../config/database';
-import { shopifyGraphQL, shopifyStorefrontGraphQL } from '../config/shopify';
+import { shopifyGraphQL } from '../config/shopify';
 import { upsertProduct } from './product-sync';
 
 const PRODUCTS_QUERY = `
@@ -35,7 +35,7 @@ const PRODUCTS_QUERY = `
               }
             }
           }
-          metafields(first: 10, namespace: "custom") {
+          metafields(first: 25, namespace: "custom") {
             edges { node { key value } }
           }
         }
@@ -45,23 +45,83 @@ const PRODUCTS_QUERY = `
   }
 `;
 
-async function buildMetaobjectMap(): Promise<Map<string, string>> {
-  const map = new Map<string, string>();
-  const q = `query {
-    growth: metaobjects(type: "growth_type", first: 50) { edges { node { id fields { key value } } } }
-    shape: metaobjects(type: "shape", first: 50) { edges { node { id fields { key value } } } }
-    style: metaobjects(type: "style", first: 50) { edges { node { id fields { key value } } } }
-    category: metaobjects(type: "category", first: 50) { edges { node { id fields { key value } } } }
-  }`;
-  const result = await shopifyStorefrontGraphQL(q);
-  for (const typeKey of ['growth', 'shape', 'style', 'category']) {
-    for (const { node } of (result.data?.[typeKey]?.edges ?? [])) {
-      const labelField = (node.fields as Array<{ key: string; value: string }>)
-        .find(f => f.key === 'label');
-      if (labelField?.value) map.set(node.id as string, labelField.value);
+export interface MetaobjectEntry {
+  gid: string;
+  handle: string;
+  label: string;
+}
+
+export interface MetaobjectCatalog {
+  labelByGid: Map<string, string>;
+  entriesByType: Map<string, MetaobjectEntry[]>;
+}
+
+const METAOBJECT_DEFINITIONS_QUERY = `
+  query GetMetaobjectDefinitions($after: String) {
+    metaobjectDefinitions(first: 100, after: $after) {
+      edges { node { type } }
+      pageInfo { hasNextPage endCursor }
     }
   }
-  return map;
+`;
+
+// No sortKey: the Admin API's default order is creation order, which is the
+// order entries were defined in the store — our canonical filter-option order.
+const METAOBJECTS_QUERY = `
+  query GetMetaobjects($type: String!, $after: String) {
+    metaobjects(type: $type, first: 250, after: $after) {
+      edges { node { id handle displayName fields { key value } } }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+`;
+
+export async function buildMetaobjectCatalog(): Promise<MetaobjectCatalog> {
+  const labelByGid = new Map<string, string>();
+  const entriesByType = new Map<string, MetaobjectEntry[]>();
+
+  const types: string[] = [];
+  let hasNextPage = true;
+  let cursor: string | null = null;
+  while (hasNextPage) {
+    const res = await shopifyGraphQL(METAOBJECT_DEFINITIONS_QUERY, { after: cursor });
+    const conn = res.data?.metaobjectDefinitions;
+    if (!conn) break;
+    for (const { node } of conn.edges) types.push(node.type as string);
+    hasNextPage = conn.pageInfo.hasNextPage as boolean;
+    cursor = conn.pageInfo.endCursor as string | null;
+  }
+
+  for (const type of types) {
+    const entries: MetaobjectEntry[] = [];
+    let more = true;
+    let after: string | null = null;
+    while (more) {
+      let res;
+      try {
+        res = await shopifyGraphQL(METAOBJECTS_QUERY, { type, after });
+      } catch (err) {
+        // One type failing must not drop label resolution for the others.
+        console.warn(`[sync] Failed to load metaobjects for type "${type}":`, err);
+        break;
+      }
+      const conn = res.data?.metaobjects;
+      if (!conn) break;
+      for (const { node } of conn.edges) {
+        const labelField = (node.fields as Array<{ key: string; value: string | null }>)
+          .find(f => f.key === 'label');
+        const label =
+          labelField?.value || (node.displayName as string) || (node.handle as string);
+        labelByGid.set(node.id as string, label);
+        entries.push({ gid: node.id as string, handle: node.handle as string, label });
+      }
+      more = conn.pageInfo.hasNextPage as boolean;
+      after = conn.pageInfo.endCursor as string | null;
+    }
+    if (entries.length > 0) entriesByType.set(type, entries);
+  }
+
+  return { labelByGid, entriesByType };
 }
 
 function resolveMetafieldValue(raw: string, map: Map<string, string>): string[] | null {
@@ -118,68 +178,75 @@ function extractId(gid: string): string {
   return gid.split('/').pop() ?? gid;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function mapProductNode(node: any, labelByGid: Map<string, string>) {
+  const productId = extractId(node.id as string);
+  const images = (node.images.edges as Array<{ node: { id: string; url: string } }>).map(e => ({
+    id: parseInt(extractId(e.node.id)),
+    src: e.node.url,
+  }));
+  const variants = (node.variants.edges as Array<{ node: Record<string, unknown> }>).map(e => {
+    const v = e.node;
+    return {
+      id: parseInt(extractId(v.id as string)),
+      title: v.title as string,
+      price: v.price as string,
+      compare_at_price: v.compareAtPrice as string | null,
+      available: v.availableForSale as boolean,
+      sku: v.sku as string | null,
+      inventory_quantity: (v.inventoryQuantity as number) ?? 0,
+      option1: (v.selectedOptions as Array<{ value: string }>)[0]?.value ?? null,
+      option2: (v.selectedOptions as Array<{ value: string }>)[1]?.value ?? null,
+      option3: (v.selectedOptions as Array<{ value: string }>)[2]?.value ?? null,
+    };
+  });
+
+  const metafields: Record<string, string[]> = {};
+  const mfEdges =
+    (node.metafields as { edges: Array<{ node: { key: string; value: string } }> } | null)
+      ?.edges ?? [];
+  for (const { node: mf } of mfEdges) {
+    if (!mf?.key || !mf?.value) continue;
+    const resolved = resolveMetafieldValue(mf.value, labelByGid);
+    if (resolved !== null) metafields[mf.key] = resolved;
+  }
+
+  return {
+    id: parseInt(productId),
+    title: node.title as string,
+    handle: node.handle as string,
+    body_html: node.descriptionHtml as string,
+    vendor: node.vendor as string,
+    product_type: node.productType as string,
+    tags: (node.tags as string[]).join(', '),
+    published_at: node.publishedAt as string | null,
+    created_at: node.createdAt as string,
+    updated_at: node.updatedAt as string,
+    variants,
+    images,
+    metafields,
+  };
+}
+
 export async function syncProducts(): Promise<number> {
   let hasNextPage = true;
   let cursor: string | null = null;
   let total = 0;
 
-  const metaobjectMap = await buildMetaobjectMap();
-  console.log(`[sync] Loaded ${metaobjectMap.size} metaobject labels`);
+  const catalog = await buildMetaobjectCatalog();
+  console.log(`[sync] Loaded ${catalog.labelByGid.size} metaobject labels across ${catalog.entriesByType.size} types`);
 
   while (hasNextPage) {
     const data = await shopifyGraphQL(PRODUCTS_QUERY, { first: 50, after: cursor });
     const { edges, pageInfo } = data.data.products;
 
     for (const { node } of edges) {
-      const productId = extractId(node.id as string);
-      const images = (node.images.edges as Array<{ node: { id: string; url: string } }>).map(e => ({
-        id: parseInt(extractId(e.node.id)),
-        src: e.node.url,
-      }));
-      const variants = (node.variants.edges as Array<{ node: Record<string, unknown> }>).map(e => {
-        const v = e.node;
-        return {
-          id: parseInt(extractId(v.id as string)),
-          title: v.title as string,
-          price: v.price as string,
-          compare_at_price: v.compareAtPrice as string | null,
-          available: v.availableForSale as boolean,
-          sku: v.sku as string | null,
-          inventory_quantity: (v.inventoryQuantity as number) ?? 0,
-          option1: (v.selectedOptions as Array<{ value: string }>)[0]?.value ?? null,
-          option2: (v.selectedOptions as Array<{ value: string }>)[1]?.value ?? null,
-          option3: (v.selectedOptions as Array<{ value: string }>)[2]?.value ?? null,
-        };
-      });
-
-      const metafields: Record<string, string[]> = {};
-      const mfEdges = (node.metafields as { edges: Array<{ node: { key: string; value: string } }> } | null)?.edges ?? [];
-      for (const { node: mf } of mfEdges) {
-        if (!mf?.key || !mf?.value) continue;
-        const resolved = resolveMetafieldValue(mf.value, metaobjectMap);
-        if (resolved !== null) metafields[mf.key] = resolved;
-      }
-
       try {
-        await upsertProduct({
-          id: parseInt(productId),
-          title: node.title as string,
-          handle: node.handle as string,
-          body_html: node.descriptionHtml as string,
-          vendor: node.vendor as string,
-          product_type: node.productType as string,
-          tags: (node.tags as string[]).join(', '),
-          published_at: node.publishedAt as string | null,
-          created_at: node.createdAt as string,
-          updated_at: node.updatedAt as string,
-          variants,
-          images,
-          metafields,
-        });
+        await upsertProduct(mapProductNode(node, catalog.labelByGid));
         total++;
       } catch (err: any) {
         const msg = err?.message || err?.toString() || String(err);
-        console.warn(`[sync] Skipping product ${productId} (${node.handle}): ${msg}`);
+        console.warn(`[sync] Skipping product ${extractId(node.id as string)} (${node.handle}): ${msg}`);
       }
     }
 
