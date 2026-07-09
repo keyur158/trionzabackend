@@ -40,8 +40,8 @@ function growthMatch(pattern: string): Prisma.Sql {
   )`;
 }
 
-const HAS_GROWTH = Prisma.sql`(jsonb_typeof(metafields->'growth_type') = 'array'
-  AND jsonb_array_length(metafields->'growth_type') > 0)`;
+const HAS_GROWTH = Prisma.sql`COALESCE(jsonb_typeof(metafields->'growth_type') = 'array'
+  AND jsonb_array_length(metafields->'growth_type') > 0, false)`;
 
 const TAG_LAB = Prisma.sql`EXISTS (SELECT 1 FROM unnest(tags) tag
   WHERE tag ILIKE '%lab grown%' OR tag ILIKE '%lab-grown%')`;

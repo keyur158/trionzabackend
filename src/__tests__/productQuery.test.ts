@@ -55,6 +55,15 @@ describe('categoryCondition', () => {
   it('includes a tag fallback for lab-grown', () => {
     expect(categoryCondition('lab-grown')!.text.toLowerCase()).toContain('unnest(tags)');
   });
+
+  // Regression test for a NULL-poisoned fallback: when metafields has no
+  // growth_type key, jsonb_typeof(...) is SQL NULL, so the un-COALESCEd
+  // HAS_GROWTH check evaluated to NULL and `NOT HAS_GROWTH` never matched,
+  // silently dropping the legacy tag fallback (verified against the dev DB:
+  // COALESCE takes the lab-grown tag fallback from 0 matches to 519).
+  it('wraps HAS_GROWTH in COALESCE so absence-of-key is false, not NULL', () => {
+    expect(categoryCondition('lab-grown')!.text).toContain('COALESCE');
+  });
 });
 
 describe('buildProductWhere', () => {

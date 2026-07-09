@@ -85,6 +85,10 @@ export async function buildMetaobjectCatalog(): Promise<MetaobjectCatalog> {
   let cursor: string | null = null;
   while (hasNextPage) {
     const res = await shopifyGraphQL(METAOBJECT_DEFINITIONS_QUERY, { after: cursor });
+    if (res.errors) {
+      console.error('[sync] Metaobject query returned errors (missing read_metaobjects/read_metaobject_definitions scopes?):', JSON.stringify(res.errors).slice(0, 500));
+      break;
+    }
     const conn = res.data?.metaobjectDefinitions;
     if (!conn) break;
     for (const { node } of conn.edges) types.push(node.type as string);
@@ -103,6 +107,10 @@ export async function buildMetaobjectCatalog(): Promise<MetaobjectCatalog> {
       } catch (err) {
         // One type failing must not drop label resolution for the others.
         console.warn(`[sync] Failed to load metaobjects for type "${type}":`, err);
+        break;
+      }
+      if (res.errors) {
+        console.error('[sync] Metaobject query returned errors (missing read_metaobjects/read_metaobject_definitions scopes?):', JSON.stringify(res.errors).slice(0, 500));
         break;
       }
       const conn = res.data?.metaobjects;
@@ -193,7 +201,9 @@ export async function syncSingleProduct(productId: string): Promise<boolean> {
   });
   const node = data.data?.product;
   if (!node) return false;
-  await upsertProduct(mapProductNode(node, catalog.labelByGid));
+  const payload = mapProductNode(node, catalog.labelByGid);
+  if (catalog.labelByGid.size === 0) delete (payload as { metafields?: unknown }).metafields;
+  await upsertProduct(payload);
   return true;
 }
 
@@ -308,6 +318,9 @@ export async function syncProducts(): Promise<number> {
 
   const catalog = await buildMetaobjectCatalog();
   console.log(`[sync] Loaded ${catalog.labelByGid.size} metaobject labels across ${catalog.entriesByType.size} types`);
+  if (catalog.labelByGid.size === 0) {
+    console.warn('[sync] Metaobject catalog is EMPTY — preserving existing product metafields for this run');
+  }
 
   try {
     await persistFilterOptions(catalog);
@@ -321,7 +334,9 @@ export async function syncProducts(): Promise<number> {
 
     for (const { node } of edges) {
       try {
-        await upsertProduct(mapProductNode(node, catalog.labelByGid));
+        const payload = mapProductNode(node, catalog.labelByGid);
+        if (catalog.labelByGid.size === 0) delete (payload as { metafields?: unknown }).metafields;
+        await upsertProduct(payload);
         total++;
       } catch (err: any) {
         const msg = err?.message || err?.toString() || String(err);

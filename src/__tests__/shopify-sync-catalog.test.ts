@@ -8,9 +8,13 @@ jest.mock('../config/database', () => ({
     $transaction: jest.fn(async (ops: unknown[]) => ops),
   },
 }));
+jest.mock('../services/product-sync', () => ({
+  upsertProduct: jest.fn(),
+}));
 
 import { shopifyGraphQL } from '../config/shopify';
-import { buildMetaobjectCatalog } from '../services/shopify-sync';
+import { buildMetaobjectCatalog, syncProducts } from '../services/shopify-sync';
+import { upsertProduct } from '../services/product-sync';
 
 const mockGraphQL = shopifyGraphQL as jest.Mock;
 
@@ -89,6 +93,94 @@ describe('buildMetaobjectCatalog', () => {
     const catalog = await buildMetaobjectCatalog();
     expect(catalog.entriesByType.has('bad_type')).toBe(false);
     expect(catalog.entriesByType.get('shape')).toHaveLength(1);
+  });
+
+  it('logs loudly and returns an empty catalog when the definitions query errors (missing scopes)', async () => {
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    mockGraphQL.mockResolvedValueOnce({
+      errors: [{ code: 'ACCESS_DENIED' }],
+      data: null,
+    });
+
+    const catalog = await buildMetaobjectCatalog();
+
+    expect(catalog.labelByGid.size).toBe(0);
+    expect(catalog.entriesByType.size).toBe(0);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Metaobject query returned errors'),
+      expect.stringContaining('ACCESS_DENIED')
+    );
+    errorSpy.mockRestore();
+  });
+});
+
+describe('syncProducts with an empty metaobject catalog', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  function productsPage(nodes: Array<{ id: string; metafieldValue: string | null }>) {
+    return {
+      data: {
+        products: {
+          edges: nodes.map(n => ({
+            node: {
+              id: n.id,
+              title: 'Test Ring',
+              handle: 'test-ring',
+              descriptionHtml: '<p>desc</p>',
+              vendor: 'Trionza',
+              productType: 'Ring',
+              tags: ['lab grown'],
+              createdAt: '2024-01-01T00:00:00Z',
+              updatedAt: '2024-01-02T00:00:00Z',
+              publishedAt: '2024-01-01T00:00:00Z',
+              images: { edges: [] },
+              variants: {
+                edges: [{
+                  node: {
+                    id: 'gid://shopify/ProductVariant/1',
+                    title: 'Default',
+                    price: '100.00',
+                    compareAtPrice: null,
+                    availableForSale: true,
+                    sku: 'SKU-1',
+                    inventoryQuantity: 5,
+                    selectedOptions: [],
+                    image: null,
+                  },
+                }],
+              },
+              metafields: {
+                edges: n.metafieldValue
+                  ? [{ node: { key: 'growth_type', value: n.metafieldValue } }]
+                  : [],
+              },
+            },
+          })),
+          pageInfo: { hasNextPage: false, endCursor: null },
+        },
+      },
+    };
+  }
+
+  it('calls upsertProduct with metafields undefined when the catalog is empty (never wipes stored metafields)', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    mockGraphQL
+      // buildMetaobjectCatalog: definitions query returns no types
+      .mockResolvedValueOnce(definitionsPage([]))
+      // syncProducts: one page of products, whose metaobject-reference metafield
+      // cannot resolve to a label because the catalog is empty
+      .mockResolvedValueOnce(
+        productsPage([{ id: 'gid://shopify/Product/1', metafieldValue: 'gid://shopify/Metaobject/999' }])
+      );
+
+    const total = await syncProducts();
+
+    expect(total).toBe(1);
+    expect(upsertProduct).toHaveBeenCalledTimes(1);
+    const payload = (upsertProduct as jest.Mock).mock.calls[0][0];
+    expect(payload.metafields).toBeUndefined();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Metaobject catalog is EMPTY'));
+    warnSpy.mockRestore();
   });
 });
 
