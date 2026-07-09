@@ -41,6 +41,7 @@ model Product {
   @@index([availableForSale, productType])
   @@index([availableForSale, createdAt])
   @@index([availableForSale, minPrice])
+  @@index([metafields], type: Gin)
 }
 
 model ProductVariant {

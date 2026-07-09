@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import NodeCache from 'node-cache';
 import { prisma } from '../config/database';
 import { Prisma } from '../generated/prisma/client';
+import { buildProductWhere, parseFiltersParam } from '../utils/product-query';
 
 const router = Router();
 const cache = new NodeCache({ stdTTL: 300 }); // 5-minute cache
@@ -43,37 +44,32 @@ router.get('/search', async (req: Request, res: Response) => {
   res.json({ products });
 });
 
-// Tag-based category filters, mirroring the app's badge logic: a product
-// tagged both lab-grown and moissanite counts as lab-grown.
-const LAB_GROWN_COND = Prisma.sql`EXISTS (
-  SELECT 1 FROM unnest(tags) tag
-  WHERE tag ILIKE '%lab grown%' OR tag ILIKE '%lab-grown%'
-)`;
-const MOISSANITE_COND = Prisma.sql`EXISTS (
-  SELECT 1 FROM unnest(tags) tag WHERE tag ILIKE '%moissanite%'
-) AND NOT ${LAB_GROWN_COND}`;
+function orderBySql(sort?: string): Prisma.Sql {
+  if (sort === 'price_asc') return Prisma.sql`"minPrice" ASC NULLS LAST`;
+  if (sort === 'price_desc') return Prisma.sql`"minPrice" DESC NULLS LAST`;
+  if (sort === 'newest') return Prisma.sql`"shopifyCreatedAt" DESC NULLS LAST`;
+  if (sort === 'title') return Prisma.sql`title ASC`;
+  return Prisma.sql`"createdAt" DESC`;
+}
 
-async function listByCategory(category: string, page: number, limit: number, sort?: string) {
-  const cond = category === 'lab-grown' ? LAB_GROWN_COND : MOISSANITE_COND;
-  let orderBy = Prisma.sql`"createdAt" DESC`;
-  if (sort === 'price_asc') orderBy = Prisma.sql`"minPrice" ASC NULLS LAST`;
-  else if (sort === 'price_desc') orderBy = Prisma.sql`"minPrice" DESC NULLS LAST`;
-  else if (sort === 'newest') orderBy = Prisma.sql`"shopifyCreatedAt" DESC NULLS LAST`;
-  else if (sort === 'title') orderBy = Prisma.sql`title ASC`;
-
+async function listFiltered(
+  where: Prisma.Sql,
+  page: number,
+  limit: number,
+  sort?: string
+) {
   const [products, countRows] = await Promise.all([
     prisma.$queryRaw<unknown[]>`
       SELECT id, title, handle, vendor, "productType", tags, "availableForSale",
              "minPrice", "maxPrice", "compareAtPrice", "currencyCode", images,
              metafields, "avgRating", "reviewCount", "createdAt"
       FROM "Product"
-      WHERE "availableForSale" = true AND ${cond}
-      ORDER BY ${orderBy}
+      WHERE ${where}
+      ORDER BY ${orderBySql(sort)}
       LIMIT ${limit} OFFSET ${(page - 1) * limit}
     `,
     prisma.$queryRaw<Array<{ count: number }>>`
-      SELECT COUNT(*)::int AS count FROM "Product"
-      WHERE "availableForSale" = true AND ${cond}
+      SELECT COUNT(*)::int AS count FROM "Product" WHERE ${where}
     `,
   ]);
   return { products, total: countRows[0]?.count ?? 0 };
@@ -84,17 +80,23 @@ router.get('/', async (req: Request, res: Response) => {
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
   const sort = req.query.sort as string;
   const type = req.query.type as string;
-  const category = req.query.category as string;
+  const category = req.query.category as string | undefined;
+  const filters = parseFiltersParam(req.query.filters);
+  const minPriceRaw = parseFloat(req.query.minPrice as string);
+  const maxPriceRaw = parseFloat(req.query.maxPrice as string);
+  const minPrice = Number.isFinite(minPriceRaw) ? minPriceRaw : undefined;
+  const maxPrice = Number.isFinite(maxPriceRaw) ? maxPriceRaw : undefined;
 
-  const cacheKey = `products:${page}:${limit}:${sort || ''}:${type || ''}:${category || ''}`;
+  const cacheKey = `products:${page}:${limit}:${sort || ''}:${type || ''}:${category || ''}:${(req.query.filters as string) || ''}:${minPrice ?? ''}:${maxPrice ?? ''}`;
   const cached = cache.get(cacheKey);
   if (cached) {
     res.json(cached);
     return;
   }
 
-  if (category === 'lab-grown' || category === 'moissanite') {
-    const { products, total } = await listByCategory(category, page, limit, sort);
+  if (category || filters || minPrice !== undefined || maxPrice !== undefined) {
+    const where = buildProductWhere({ category, filters, minPrice, maxPrice, type });
+    const { products, total } = await listFiltered(where, page, limit, sort);
     const result = { products, total, page, limit, pages: Math.ceil(total / limit) };
     cache.set(cacheKey, result);
     res.json(result);
