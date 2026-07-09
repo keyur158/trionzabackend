@@ -6,6 +6,7 @@ import { env } from '../config/env';
 import { createShopifyOrder } from '../services/shopify-order';
 import { createOrFindShopifyCustomer } from '../services/shopify-customer';
 import { sendOrderPush } from '../services/push';
+import { validateShopifyDiscount, ValidatedDiscount } from '../services/shopify-discount';
 
 const router = Router();
 
@@ -22,7 +23,7 @@ async function computeTotals(customerId: string, shippingRateId: number, couponC
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   cart: any;
   shippingRate: Awaited<ReturnType<typeof prisma.shippingRate.findUnique>>;
-  coupon: Awaited<ReturnType<typeof prisma.coupon.findUnique>>;
+  discount: ValidatedDiscount | null;
 }> {
   const cart = await prisma.cart.findUnique({
     where: { customerId },
@@ -49,26 +50,32 @@ async function computeTotals(customerId: string, shippingRateId: number, couponC
 
   const shipping = Number(shippingRate.price);
 
-  let discount = 0;
-  let coupon = null;
+  let discountAmount = 0;
+  let discount: ValidatedDiscount | null = null;
   if (couponCode) {
-    coupon = await prisma.coupon.findUnique({ where: { code: couponCode.toUpperCase() } });
-    if (
-      coupon && coupon.isActive &&
-      (!coupon.expiresAt || coupon.expiresAt > new Date()) &&
-      (!coupon.maxUses || coupon.usedCount < coupon.maxUses) &&
-      (!coupon.minOrderValue || subtotal >= Number(coupon.minOrderValue))
-    ) {
-      discount = coupon.discountType === 'percentage'
-        ? (subtotal * Number(coupon.discountValue)) / 100
-        : Math.min(Number(coupon.discountValue), subtotal);
+    const validation = await validateShopifyDiscount(String(couponCode).trim(), subtotal);
+    if (!validation.ok) {
+      // Invalid at calculate/pay time must fail loudly, not silently drop to 0 —
+      // the user sees why before money moves.
+      const err = new Error(validation.message) as Error & { statusCode?: number };
+      err.statusCode = validation.status;
+      throw err;
     }
+    discount = validation.discount;
+    discountAmount = discount.discountType === 'percentage'
+      ? (subtotal * discount.discountValue) / 100
+      : Math.min(discount.discountValue, subtotal);
   }
 
   const tax = 0;
-  const total = Math.max(0, subtotal + shipping - discount + tax);
+  const total = Math.max(0, subtotal + shipping - discountAmount + tax);
 
-  return { totals: { subtotal, shipping, discount, tax, total }, cart: cart as never, shippingRate, coupon };
+  return {
+    totals: { subtotal, shipping, discount: discountAmount, tax, total },
+    cart: cart as never,
+    shippingRate,
+    discount,
+  };
 }
 
 router.post('/calculate', requireAuth, async (req: Request, res: Response) => {
@@ -87,7 +94,9 @@ router.post('/calculate', requireAuth, async (req: Request, res: Response) => {
       total: totals.total.toFixed(2),
     });
   } catch (err: unknown) {
-    res.status(400).json({ message: err instanceof Error ? err.message : 'Calculation failed' });
+    const status = (err as { statusCode?: number })?.statusCode ?? 400;
+    res.status(status).json({ message: err instanceof Error ? err.message : 'Calculation failed' });
+    return;
   }
 });
 
@@ -97,20 +106,26 @@ router.post('/validate-coupon', requireAuth, async (req: Request, res: Response)
     res.status(400).json({ message: 'code is required' });
     return;
   }
-  const coupon = await prisma.coupon.findUnique({ where: { code: code.toUpperCase() } });
-  if (!coupon || !coupon.isActive) {
-    res.status(404).json({ message: 'Invalid coupon code' });
+  // Subtotal of the current cart for the minimum-purchase check.
+  const cart = await prisma.cart.findUnique({
+    where: { customerId: req.user!.id },
+    include: { items: { include: { variant: { select: { price: true } } } } },
+  });
+  const subtotal =
+    cart?.items.reduce((sum, item) => sum + Number(item.variant.price) * item.quantity, 0) ?? 0;
+
+  const validation = await validateShopifyDiscount(String(code).trim(), subtotal);
+  if (!validation.ok) {
+    res.status(validation.status).json({ message: validation.message });
     return;
   }
-  if (coupon.expiresAt && coupon.expiresAt < new Date()) {
-    res.status(400).json({ message: 'Coupon has expired' });
-    return;
-  }
-  if (coupon.maxUses && coupon.usedCount >= coupon.maxUses) {
-    res.status(400).json({ message: 'Coupon usage limit reached' });
-    return;
-  }
-  res.json({ code: coupon.code, discountType: coupon.discountType, discountValue: coupon.discountValue, minOrderValue: coupon.minOrderValue });
+  const d = validation.discount;
+  res.json({
+    code: d.code,
+    discountType: d.discountType,
+    discountValue: d.discountValue,
+    minOrderValue: d.minOrderValue,
+  });
 });
 
 // Creates a PayPal order server-side (secret never leaves the server) and returns the
@@ -127,7 +142,8 @@ router.post('/create-paypal-order', requireAuth, async (req: Request, res: Respo
     const result = await computeTotals(req.user!.id, parseInt(shippingRateId), couponCode);
     totals = result.totals;
   } catch (err: unknown) {
-    res.status(400).json({ message: err instanceof Error ? err.message : 'Calculation failed' });
+    const status = (err as { statusCode?: number })?.statusCode ?? 400;
+    res.status(status).json({ message: err instanceof Error ? err.message : 'Calculation failed' });
     return;
   }
 
@@ -190,14 +206,14 @@ router.post('/create-order', requireAuth, async (req: Request, res: Response) =>
     return;
   }
 
-  let totals: Totals, cart: Awaited<ReturnType<typeof prisma.cart.findUnique>>, coupon: Awaited<ReturnType<typeof prisma.coupon.findUnique>>;
+  let totals: Totals, discount: ValidatedDiscount | null;
   try {
     const result = await computeTotals(customer.id, parseInt(shippingRateId), couponCode);
     totals = result.totals;
-    cart = result.cart;
-    coupon = result.coupon;
+    discount = result.discount;
   } catch (err: unknown) {
-    res.status(400).json({ message: err instanceof Error ? err.message : 'Checkout calculation failed' });
+    const status = (err as { statusCode?: number })?.statusCode ?? 400;
+    res.status(status).json({ message: err instanceof Error ? err.message : 'Checkout calculation failed' });
     return;
   }
 
@@ -297,9 +313,6 @@ router.post('/create-order', requireAuth, async (req: Request, res: Response) =>
         },
       });
       await tx.cartItem.deleteMany({ where: { cartId: fullCart!.id! } });
-      if (coupon) {
-        await tx.coupon.update({ where: { id: coupon.id }, data: { usedCount: { increment: 1 } } });
-      }
       return created;
     });
   } catch (err) {
@@ -404,14 +417,14 @@ router.post('/create-order-test', requireAuth, async (req: Request, res: Respons
   const address = await prisma.address.findFirst({ where: { id: parseInt(addressId), customerId: customer.id } });
   if (!address) { res.status(404).json({ message: 'Address not found' }); return; }
 
-  let totals: Totals, cart: Awaited<ReturnType<typeof prisma.cart.findUnique>>, coupon: Awaited<ReturnType<typeof prisma.coupon.findUnique>>;
+  let totals: Totals, discount: ValidatedDiscount | null;
   try {
     const result = await computeTotals(customer.id, parseInt(shippingRateId), couponCode);
     totals = result.totals;
-    cart = result.cart;
-    coupon = result.coupon;
+    discount = result.discount;
   } catch (err: unknown) {
-    res.status(400).json({ message: err instanceof Error ? err.message : 'Checkout calculation failed' });
+    const status = (err as { statusCode?: number })?.statusCode ?? 400;
+    res.status(status).json({ message: err instanceof Error ? err.message : 'Checkout calculation failed' });
     return;
   }
 
@@ -529,9 +542,6 @@ router.post('/create-order-test', requireAuth, async (req: Request, res: Respons
       },
     });
     await tx.cartItem.deleteMany({ where: { cartId: fullCart!.id! } });
-    if (coupon) {
-      await tx.coupon.update({ where: { id: coupon.id }, data: { usedCount: { increment: 1 } } });
-    }
     return created;
   });
 
