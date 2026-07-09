@@ -2,7 +2,12 @@ jest.mock('../config/shopify', () => ({
   shopifyGraphQL: jest.fn(),
   shopifyStorefrontGraphQL: jest.fn(),
 }));
-jest.mock('../config/database', () => ({ prisma: {} }));
+jest.mock('../config/database', () => ({
+  prisma: {
+    filterOption: { deleteMany: jest.fn(), createMany: jest.fn() },
+    $transaction: jest.fn(async (ops: unknown[]) => ops),
+  },
+}));
 
 import { shopifyGraphQL } from '../config/shopify';
 import { buildMetaobjectCatalog } from '../services/shopify-sync';
@@ -84,5 +89,32 @@ describe('buildMetaobjectCatalog', () => {
     const catalog = await buildMetaobjectCatalog();
     expect(catalog.entriesByType.has('bad_type')).toBe(false);
     expect(catalog.entriesByType.get('shape')).toHaveLength(1);
+  });
+});
+
+import { prisma } from '../config/database';
+import { persistFilterOptions } from '../services/shopify-sync';
+
+describe('persistFilterOptions', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('replaces each type atomically with positions in catalog order', async () => {
+    await persistFilterOptions({
+      labelByGid: new Map(),
+      entriesByType: new Map([
+        ['clarity', [
+          { gid: 'g1', handle: 'fl', label: 'FL' },
+          { gid: 'g2', handle: 'if', label: 'IF' },
+        ]],
+      ]),
+    });
+
+    expect(prisma.filterOption.deleteMany).toHaveBeenCalledWith({ where: { type: 'clarity' } });
+    expect(prisma.filterOption.createMany).toHaveBeenCalledWith({
+      data: [
+        { type: 'clarity', handle: 'fl', label: 'FL', position: 0 },
+        { type: 'clarity', handle: 'if', label: 'IF', position: 1 },
+      ],
+    });
   });
 });

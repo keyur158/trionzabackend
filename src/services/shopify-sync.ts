@@ -124,6 +124,17 @@ export async function buildMetaobjectCatalog(): Promise<MetaobjectCatalog> {
   return { labelByGid, entriesByType };
 }
 
+export async function persistFilterOptions(catalog: MetaobjectCatalog): Promise<void> {
+  for (const [type, entries] of catalog.entriesByType) {
+    await prisma.$transaction([
+      prisma.filterOption.deleteMany({ where: { type } }),
+      prisma.filterOption.createMany({
+        data: entries.map((e, i) => ({ type, handle: e.handle, label: e.label, position: i })),
+      }),
+    ]);
+  }
+}
+
 function resolveMetafieldValue(raw: string, map: Map<string, string>): string[] | null {
   // List of metaobject references: JSON array string
   if (raw.startsWith('[')) {
@@ -235,6 +246,12 @@ export async function syncProducts(): Promise<number> {
 
   const catalog = await buildMetaobjectCatalog();
   console.log(`[sync] Loaded ${catalog.labelByGid.size} metaobject labels across ${catalog.entriesByType.size} types`);
+
+  try {
+    await persistFilterOptions(catalog);
+  } catch (err) {
+    console.warn('[sync] Failed to persist filter options:', err);
+  }
 
   while (hasNextPage) {
     const data = await shopifyGraphQL(PRODUCTS_QUERY, { first: 50, after: cursor });

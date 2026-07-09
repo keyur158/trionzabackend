@@ -215,6 +215,17 @@ model Coupon {
   isActive      Boolean   @default(true)
 }
 
+model FilterOption {
+  id       Int    @id @default(autoincrement())
+  type     String
+  handle   String
+  label    String
+  position Int
+
+  @@unique([type, handle])
+  @@index([type])
+}
+
 model DeviceToken {
   id            Int       @id @default(autoincrement())
   customerEmail String?
