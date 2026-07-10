@@ -69,8 +69,8 @@ const UNAVAILABLE: DiscountValidation = {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function collectCollectionIds(nodeId: string, items: any): Promise<string[]> {
-  const ids = items.collections.nodes.map((n: { id: string }) => numericId(n.id));
-  let pageInfo = items.collections.pageInfo;
+  const ids = (items.collections?.nodes ?? []).map((n: { id: string }) => numericId(n.id));
+  let pageInfo = items.collections?.pageInfo;
   let guard = 0;
   while (pageInfo?.hasNextPage && guard++ < 50) {
     const q = `
@@ -86,8 +86,9 @@ async function collectCollectionIds(nodeId: string, items: any): Promise<string[
         }
       }`;
     const res = await shopifyGraphQL(q, { id: nodeId, after: pageInfo.endCursor });
+    if (res.errors) throw new Error('Shopify discount scope pagination returned errors');
     const conn = res.data?.codeDiscountNode?.codeDiscount?.customerGets?.items?.collections;
-    if (!conn) break;
+    if (!conn) throw new Error('Shopify discount scope pagination missing connection');
     ids.push(...conn.nodes.map((n: { id: string }) => numericId(n.id)));
     pageInfo = conn.pageInfo;
   }
@@ -118,8 +119,9 @@ async function collectProductIds(nodeId: string, items: any): Promise<string[]> 
           }
         }`;
       const res = await shopifyGraphQL(q, { id: nodeId, after: pageInfo.endCursor });
+      if (res.errors) throw new Error('Shopify discount scope pagination returned errors');
       const conn = res.data?.codeDiscountNode?.codeDiscount?.customerGets?.items?.[p.field];
-      if (!conn) break;
+      if (!conn) throw new Error('Shopify discount scope pagination missing connection');
       for (const n of conn.nodes) ids.add(p.field === 'products' ? numericId(n.id) : numericId(n.product.id));
       pageInfo = conn.pageInfo;
     }
@@ -173,14 +175,19 @@ export async function validateShopifyDiscount(
   }
   const items = d.customerGets?.items;
   let scope: DiscountScope;
-  if (items?.__typename === 'AllDiscountItems') {
-    scope = { kind: 'all' };
-  } else if (items?.__typename === 'DiscountCollections') {
-    scope = { kind: 'collections', ids: await collectCollectionIds(node.id, items) };
-  } else if (items?.__typename === 'DiscountProducts') {
-    scope = { kind: 'products', ids: await collectProductIds(node.id, items) };
-  } else {
-    return { ok: false, status: 400, message: "This code type isn't supported in the app" };
+  try {
+    if (items?.__typename === 'AllDiscountItems') {
+      scope = { kind: 'all' };
+    } else if (items?.__typename === 'DiscountCollections') {
+      scope = { kind: 'collections', ids: await collectCollectionIds(node.id, items) };
+    } else if (items?.__typename === 'DiscountProducts') {
+      scope = { kind: 'products', ids: await collectProductIds(node.id, items) };
+    } else {
+      return { ok: false, status: 400, message: "This code type isn't supported in the app" };
+    }
+  } catch (err) {
+    console.error('Shopify discount scope pagination failed:', err);
+    return UNAVAILABLE;
   }
 
   let minOrderValue: number | null = null;

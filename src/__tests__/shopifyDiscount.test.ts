@@ -147,6 +147,65 @@ describe('validateShopifyDiscount', () => {
     expect(r).toMatchObject({ ok: true, discount: { scope: { kind: 'collections', ids: ['11', '22'] } } });
   });
 
+  it('paginates a products scope that spans multiple pages', async () => {
+    mockGraphQL
+      .mockResolvedValueOnce(basicDiscount({
+        customerGets: {
+          value: { __typename: 'DiscountPercentage', percentage: 0.1 },
+          items: {
+            __typename: 'DiscountProducts',
+            products: { nodes: [{ id: 'gid://shopify/Product/111' }], pageInfo: { hasNextPage: true, endCursor: 'CURSOR1' } },
+            productVariants: { nodes: [{ product: { id: 'gid://shopify/Product/222' } }], pageInfo: { hasNextPage: false, endCursor: null } },
+          },
+        },
+      }))
+      .mockResolvedValueOnce({
+        data: { codeDiscountNode: { codeDiscount: { customerGets: { items: {
+          products: { nodes: [{ id: 'gid://shopify/Product/333' }], pageInfo: { hasNextPage: false, endCursor: null } },
+        } } } } },
+      });
+    const r = await validateShopifyDiscount('PROD', 500);
+    expect(r).toMatchObject({ ok: true, discount: { scope: { kind: 'products', ids: expect.arrayContaining(['111', '222', '333']) } } });
+    if (r.ok) expect(r.discount.scope.kind === 'products' && r.discount.scope.ids).toHaveLength(3);
+  });
+
+  it('fails closed with 503 when a paginated follow-up page throws', async () => {
+    mockGraphQL
+      .mockResolvedValueOnce(basicDiscount({
+        customerGets: {
+          value: { __typename: 'DiscountPercentage', percentage: 0.1 },
+          items: {
+            __typename: 'DiscountCollections',
+            collections: { nodes: [{ id: 'gid://shopify/Collection/11' }], pageInfo: { hasNextPage: true, endCursor: 'CURSOR1' } },
+          },
+        },
+      }))
+      .mockRejectedValueOnce(new Error('network'));
+    const r = await validateShopifyDiscount('COLL', 500);
+    expect(r).toEqual({
+      ok: false,
+      status: 503,
+      message: "Couldn't verify the code right now. Please try again.",
+    });
+  });
+
+  it('fails closed with 503 when a paginated follow-up page returns GraphQL errors', async () => {
+    mockGraphQL
+      .mockResolvedValueOnce(basicDiscount({
+        customerGets: {
+          value: { __typename: 'DiscountPercentage', percentage: 0.1 },
+          items: {
+            __typename: 'DiscountCollections',
+            collections: { nodes: [{ id: 'gid://shopify/Collection/11' }], pageInfo: { hasNextPage: true, endCursor: 'CURSOR1' } },
+          },
+        },
+      }))
+      .mockResolvedValueOnce({ errors: [{ message: 'throttled' }] });
+    const r = await validateShopifyDiscount('COLL', 500);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.status).toBe(503);
+  });
+
   it('enforces the minimum subtotal with the amount in the message', async () => {
     mockGraphQL.mockResolvedValueOnce(basicDiscount({
       minimumRequirement: {
