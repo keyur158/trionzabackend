@@ -33,6 +33,23 @@ interface CreateShopifyOrderInput {
   appliedDiscountAmount?: number;
 }
 
+function buildDiscountCode(discount: ValidatedDiscount, appliedAmount?: number) {
+  const scoped = discount.scope && discount.scope.kind !== 'all';
+  if (!scoped && discount.discountType === 'percentage') {
+    return { itemPercentageDiscountCode: { code: discount.code, percentage: discount.discountValue } };
+  }
+  const amount = (appliedAmount ?? discount.discountValue).toFixed(2);
+  return {
+    itemFixedDiscountCode: {
+      code: discount.code,
+      amountSet: {
+        shopMoney: { amount, currencyCode: 'USD' },
+        presentmentMoney: { amount, currencyCode: 'USD' },
+      },
+    },
+  };
+}
+
 export async function createShopifyOrder(data: CreateShopifyOrderInput): Promise<{ id: string; name: string } | null> {
   const mutation = `
     mutation orderCreate($order: OrderCreateOrderInput!) {
@@ -64,31 +81,7 @@ export async function createShopifyOrder(data: CreateShopifyOrderInput): Promise
       },
       tags: ['mobile-app', 'paypal'],
       note: `PayPal: ${data.paypalTransactionId}`,
-      ...(data.discount && {
-        discountCode:
-          data.discount.discountType === 'percentage'
-            ? {
-                itemPercentageDiscountCode: {
-                  code: data.discount.code,
-                  percentage: data.discount.discountValue,
-                },
-              }
-            : {
-                itemFixedDiscountCode: {
-                  code: data.discount.code,
-                  amountSet: {
-                    shopMoney: {
-                      amount: (data.appliedDiscountAmount ?? data.discount.discountValue).toFixed(2),
-                      currencyCode: 'USD',
-                    },
-                    presentmentMoney: {
-                      amount: (data.appliedDiscountAmount ?? data.discount.discountValue).toFixed(2),
-                      currencyCode: 'USD',
-                    },
-                  },
-                },
-              },
-      }),
+      ...(data.discount && { discountCode: buildDiscountCode(data.discount, data.appliedDiscountAmount) }),
       transactions: [{
         kind: 'SALE',
         status: 'SUCCESS',

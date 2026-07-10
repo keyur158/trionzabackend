@@ -78,6 +78,24 @@ describe('createShopifyOrder discount attachment', () => {
     });
   });
 
+  it('sends itemFixedDiscountCode for a scoped percentage discount', async () => {
+    await createShopifyOrder({
+      ...baseInput,
+      discount: { code: 'TEST10', discountType: 'percentage', discountValue: 10, minOrderValue: null, scope: { kind: 'collections', ids: ['11'] } },
+      appliedDiscountAmount: 80,
+    });
+    const variables = mockGraphQL.mock.calls[0][1];
+    expect(variables.order.discountCode).toEqual({
+      itemFixedDiscountCode: {
+        code: 'TEST10',
+        amountSet: {
+          shopMoney: { amount: '80.00', currencyCode: 'USD' },
+          presentmentMoney: { amount: '80.00', currencyCode: 'USD' },
+        },
+      },
+    });
+  });
+
   it('omits discountCode when no discount is applied', async () => {
     await createShopifyOrder(baseInput);
     const variables = mockGraphQL.mock.calls[0][1];
