@@ -1,10 +1,20 @@
 import { shopifyGraphQL } from '../config/shopify';
 
+export type DiscountScope =
+  | { kind: 'all' }
+  | { kind: 'collections'; ids: string[] }
+  | { kind: 'products'; ids: string[] };
+
+function numericId(gid: string): string {
+  return gid.split('/').pop() ?? gid;
+}
+
 export interface ValidatedDiscount {
   code: string;
   discountType: 'percentage' | 'fixed';
   discountValue: number; // 10 => 10% off; 50 => $50 off
   minOrderValue: number | null;
+  scope: DiscountScope;
 }
 
 export type DiscountValidation =
@@ -14,6 +24,7 @@ export type DiscountValidation =
 const DISCOUNT_QUERY = `
   query DiscountByCode($code: String!) {
     codeDiscountNodeByCode(code: $code) {
+      id
       codeDiscount {
         __typename
         ... on DiscountCodeBasic {
@@ -29,7 +40,16 @@ const DISCOUNT_QUERY = `
               ... on DiscountPercentage { percentage }
               ... on DiscountAmount { amount { amount currencyCode } }
             }
-            items { __typename }
+            items {
+              __typename
+              ... on DiscountCollections {
+                collections(first: 250) { nodes { id } pageInfo { hasNextPage endCursor } }
+              }
+              ... on DiscountProducts {
+                products(first: 250) { nodes { id } pageInfo { hasNextPage endCursor } }
+                productVariants(first: 250) { nodes { product { id } } pageInfo { hasNextPage endCursor } }
+              }
+            }
           }
           minimumRequirement {
             __typename
@@ -47,9 +67,70 @@ const UNAVAILABLE: DiscountValidation = {
   message: "Couldn't verify the code right now. Please try again.",
 };
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function collectCollectionIds(nodeId: string, items: any): Promise<string[]> {
+  const ids = items.collections.nodes.map((n: { id: string }) => numericId(n.id));
+  let pageInfo = items.collections.pageInfo;
+  let guard = 0;
+  while (pageInfo?.hasNextPage && guard++ < 50) {
+    const q = `
+      query Page($id: ID!, $after: String) {
+        codeDiscountNode(id: $id) {
+          codeDiscount {
+            ... on DiscountCodeBasic {
+              customerGets { items { ... on DiscountCollections {
+                collections(first: 250, after: $after) { nodes { id } pageInfo { hasNextPage endCursor } }
+              } } }
+            }
+          }
+        }
+      }`;
+    const res = await shopifyGraphQL(q, { id: nodeId, after: pageInfo.endCursor });
+    const conn = res.data?.codeDiscountNode?.codeDiscount?.customerGets?.items?.collections;
+    if (!conn) break;
+    ids.push(...conn.nodes.map((n: { id: string }) => numericId(n.id)));
+    pageInfo = conn.pageInfo;
+  }
+  return ids;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function collectProductIds(nodeId: string, items: any): Promise<string[]> {
+  const ids = new Set<string>();
+  for (const n of items.products?.nodes ?? []) ids.add(numericId(n.id));
+  for (const n of items.productVariants?.nodes ?? []) ids.add(numericId(n.product.id));
+
+  const pages: Array<{ field: 'products' | 'productVariants'; pageInfo: { hasNextPage: boolean; endCursor: string | null } }> = [
+    { field: 'products', pageInfo: items.products?.pageInfo },
+    { field: 'productVariants', pageInfo: items.productVariants?.pageInfo },
+  ];
+  for (const p of pages) {
+    let pageInfo = p.pageInfo;
+    let guard = 0;
+    while (pageInfo?.hasNextPage && guard++ < 50) {
+      const inner = p.field === 'products'
+        ? `products(first: 250, after: $after) { nodes { id } pageInfo { hasNextPage endCursor } }`
+        : `productVariants(first: 250, after: $after) { nodes { product { id } } pageInfo { hasNextPage endCursor } }`;
+      const q = `
+        query Page($id: ID!, $after: String) {
+          codeDiscountNode(id: $id) {
+            codeDiscount { ... on DiscountCodeBasic { customerGets { items { ... on DiscountProducts { ${inner} } } } } }
+          }
+        }`;
+      const res = await shopifyGraphQL(q, { id: nodeId, after: pageInfo.endCursor });
+      const conn = res.data?.codeDiscountNode?.codeDiscount?.customerGets?.items?.[p.field];
+      if (!conn) break;
+      for (const n of conn.nodes) ids.add(p.field === 'products' ? numericId(n.id) : numericId(n.product.id));
+      pageInfo = conn.pageInfo;
+    }
+  }
+  return [...ids];
+}
+
 /**
  * Validates a Shopify discount code against the Admin API. Only
- * "Amount off order" (DiscountCodeBasic, all items) codes are supported.
+ * "Amount off order" (DiscountCodeBasic, all items/collections/products)
+ * codes are supported.
  * Fails CLOSED: any API failure returns 503 rather than accepting/ignoring.
  */
 export async function validateShopifyDiscount(
@@ -68,7 +149,8 @@ export async function validateShopifyDiscount(
     return UNAVAILABLE;
   }
 
-  const d = data.data?.codeDiscountNodeByCode?.codeDiscount;
+  const node = data.data?.codeDiscountNodeByCode;
+  const d = node?.codeDiscount;
   if (!d) return { ok: false, status: 404, message: 'Invalid discount code' };
 
   if (d.__typename !== 'DiscountCodeBasic') {
@@ -89,12 +171,16 @@ export async function validateShopifyDiscount(
   if (d.usageLimit != null && d.asyncUsageCount >= d.usageLimit) {
     return { ok: false, status: 400, message: 'This code has reached its usage limit' };
   }
-  if (d.customerGets?.items?.__typename !== 'AllDiscountItems') {
-    return {
-      ok: false,
-      status: 400,
-      message: "This code applies to specific products and isn't supported in the app",
-    };
+  const items = d.customerGets?.items;
+  let scope: DiscountScope;
+  if (items?.__typename === 'AllDiscountItems') {
+    scope = { kind: 'all' };
+  } else if (items?.__typename === 'DiscountCollections') {
+    scope = { kind: 'collections', ids: await collectCollectionIds(node.id, items) };
+  } else if (items?.__typename === 'DiscountProducts') {
+    scope = { kind: 'products', ids: await collectProductIds(node.id, items) };
+  } else {
+    return { ok: false, status: 400, message: "This code type isn't supported in the app" };
   }
 
   let minOrderValue: number | null = null;
@@ -122,6 +208,7 @@ export async function validateShopifyDiscount(
         discountType: 'percentage',
         discountValue: value.percentage * 100,
         minOrderValue,
+        scope,
       },
     };
   }
@@ -133,6 +220,7 @@ export async function validateShopifyDiscount(
         discountType: 'fixed',
         discountValue: parseFloat(value.amount.amount),
         minOrderValue,
+        scope,
       },
     };
   }

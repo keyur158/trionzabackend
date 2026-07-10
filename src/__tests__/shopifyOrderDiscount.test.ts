@@ -29,7 +29,7 @@ describe('createShopifyOrder discount attachment', () => {
   it('sends itemPercentageDiscountCode for percentage discounts', async () => {
     await createShopifyOrder({
       ...baseInput,
-      discount: { code: 'SAVE10', discountType: 'percentage', discountValue: 10, minOrderValue: null },
+      discount: { code: 'SAVE10', discountType: 'percentage', discountValue: 10, minOrderValue: null, scope: { kind: 'all' } },
     });
 
     const variables = mockGraphQL.mock.calls[0][1];
@@ -41,7 +41,7 @@ describe('createShopifyOrder discount attachment', () => {
   it('sends itemFixedDiscountCode for fixed discounts', async () => {
     await createShopifyOrder({
       ...baseInput,
-      discount: { code: 'FLAT50', discountType: 'fixed', discountValue: 50, minOrderValue: null },
+      discount: { code: 'FLAT50', discountType: 'fixed', discountValue: 50, minOrderValue: null, scope: { kind: 'all' } },
     });
 
     const variables = mockGraphQL.mock.calls[0][1];
@@ -62,7 +62,7 @@ describe('createShopifyOrder discount attachment', () => {
     await createShopifyOrder({
       ...baseInput,
       totalPrice: '20.00',
-      discount: { code: 'FLAT900', discountType: 'fixed', discountValue: 900, minOrderValue: null },
+      discount: { code: 'FLAT900', discountType: 'fixed', discountValue: 900, minOrderValue: null, scope: { kind: 'all' } },
       appliedDiscountAmount: 500,
     });
 

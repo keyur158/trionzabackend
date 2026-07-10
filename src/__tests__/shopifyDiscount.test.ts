@@ -12,6 +12,7 @@ function basicDiscount(overrides: Record<string, unknown> = {}) {
   return {
     data: {
       codeDiscountNodeByCode: {
+        id: 'gid://shopify/DiscountCodeNode/1',
         codeDiscount: {
           __typename: 'DiscountCodeBasic',
           title: 'SAVE10',
@@ -40,7 +41,7 @@ describe('validateShopifyDiscount', () => {
     const r = await validateShopifyDiscount('SAVE10', 500);
     expect(r).toEqual({
       ok: true,
-      discount: { code: 'SAVE10', discountType: 'percentage', discountValue: 10, minOrderValue: null },
+      discount: { code: 'SAVE10', discountType: 'percentage', discountValue: 10, minOrderValue: null, scope: { kind: 'all' } },
     });
   });
 
@@ -54,7 +55,7 @@ describe('validateShopifyDiscount', () => {
     const r = await validateShopifyDiscount('FLAT50', 500);
     expect(r).toEqual({
       ok: true,
-      discount: { code: 'FLAT50', discountType: 'fixed', discountValue: 50, minOrderValue: null },
+      discount: { code: 'FLAT50', discountType: 'fixed', discountValue: 50, minOrderValue: null, scope: { kind: 'all' } },
     });
   });
 
@@ -97,16 +98,53 @@ describe('validateShopifyDiscount', () => {
     if (!r.ok) expect(r.message).toContain('usage limit');
   });
 
-  it('rejects product-scoped codes', async () => {
+  it('parses product-scoped codes into a products scope', async () => {
     mockGraphQL.mockResolvedValueOnce(basicDiscount({
       customerGets: {
         value: { __typename: 'DiscountPercentage', percentage: 0.1 },
-        items: { __typename: 'DiscountProducts' },
+        items: {
+          __typename: 'DiscountProducts',
+          products: { nodes: [{ id: 'gid://shopify/Product/456' }], pageInfo: { hasNextPage: false, endCursor: null } },
+          productVariants: { nodes: [{ product: { id: 'gid://shopify/Product/789' } }], pageInfo: { hasNextPage: false, endCursor: null } },
+        },
       },
     }));
-    const r = await validateShopifyDiscount('X', 500);
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.message).toContain('specific products');
+    const r = await validateShopifyDiscount('PROD', 500);
+    expect(r).toMatchObject({ ok: true, discount: { scope: { kind: 'products', ids: ['456', '789'] } } });
+  });
+
+  it('parses collection-scoped codes into a collections scope', async () => {
+    mockGraphQL.mockResolvedValueOnce(basicDiscount({
+      customerGets: {
+        value: { __typename: 'DiscountPercentage', percentage: 0.1 },
+        items: {
+          __typename: 'DiscountCollections',
+          collections: { nodes: [{ id: 'gid://shopify/Collection/11' }, { id: 'gid://shopify/Collection/22' }], pageInfo: { hasNextPage: false, endCursor: null } },
+        },
+      },
+    }));
+    const r = await validateShopifyDiscount('COLL', 500);
+    expect(r).toMatchObject({ ok: true, discount: { scope: { kind: 'collections', ids: ['11', '22'] } } });
+  });
+
+  it('paginates a collection scope that spans multiple pages', async () => {
+    mockGraphQL
+      .mockResolvedValueOnce(basicDiscount({
+        customerGets: {
+          value: { __typename: 'DiscountPercentage', percentage: 0.1 },
+          items: {
+            __typename: 'DiscountCollections',
+            collections: { nodes: [{ id: 'gid://shopify/Collection/11' }], pageInfo: { hasNextPage: true, endCursor: 'CURSOR1' } },
+          },
+        },
+      }))
+      .mockResolvedValueOnce({
+        data: { codeDiscountNode: { codeDiscount: { customerGets: { items: {
+          collections: { nodes: [{ id: 'gid://shopify/Collection/22' }], pageInfo: { hasNextPage: false, endCursor: null } },
+        } } } } },
+      });
+    const r = await validateShopifyDiscount('COLL', 500);
+    expect(r).toMatchObject({ ok: true, discount: { scope: { kind: 'collections', ids: ['11', '22'] } } });
   });
 
   it('enforces the minimum subtotal with the amount in the message', async () => {
