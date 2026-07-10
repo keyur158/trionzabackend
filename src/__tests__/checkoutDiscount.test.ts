@@ -23,6 +23,7 @@ jest.mock('../config/database', () => ({
   prisma: {
     cart: { findUnique: jest.fn() },
     shippingRate: { findUnique: jest.fn() },
+    collectionProduct: { findMany: jest.fn() },
   },
 }));
 
@@ -42,6 +43,7 @@ function cartWith(price: number, qty = 1) {
   return {
     id: 1,
     items: [{
+      productId: 'p1',
       quantity: qty,
       variant: { id: 'v1', title: 'V', price, availableForSale: true, inventoryQty: 5 },
       product: { title: 'P', images: [] },
@@ -61,7 +63,7 @@ describe('POST /api/checkout/calculate with Shopify discounts', () => {
   it('applies a percentage discount to the subtotal', async () => {
     mockValidate.mockResolvedValue({
       ok: true,
-      discount: { code: 'SAVE10', discountType: 'percentage', discountValue: 10, minOrderValue: null },
+      discount: { code: 'SAVE10', discountType: 'percentage', discountValue: 10, minOrderValue: null, scope: { kind: 'all' } },
     });
 
     const res = await request(app)
@@ -76,7 +78,7 @@ describe('POST /api/checkout/calculate with Shopify discounts', () => {
   it('caps a fixed discount at the subtotal', async () => {
     mockValidate.mockResolvedValue({
       ok: true,
-      discount: { code: 'FLAT900', discountType: 'fixed', discountValue: 900, minOrderValue: null },
+      discount: { code: 'FLAT900', discountType: 'fixed', discountValue: 900, minOrderValue: null, scope: { kind: 'all' } },
     });
 
     const res = await request(app)
@@ -130,7 +132,7 @@ describe('POST /api/checkout/validate-coupon', () => {
   it('returns the discount details on success', async () => {
     mockValidate.mockResolvedValue({
       ok: true,
-      discount: { code: 'SAVE10', discountType: 'percentage', discountValue: 10, minOrderValue: null },
+      discount: { code: 'SAVE10', discountType: 'percentage', discountValue: 10, minOrderValue: null, scope: { kind: 'all' } },
     });
 
     const res = await request(app)
@@ -139,7 +141,7 @@ describe('POST /api/checkout/validate-coupon', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
-      code: 'SAVE10', discountType: 'percentage', discountValue: 10, minOrderValue: null,
+      code: 'SAVE10', discountType: 'percentage', discountValue: 10, minOrderValue: null, discountAmount: '50.00',
     });
     expect(mockValidate).toHaveBeenCalledWith('SAVE10', 500);
   });
@@ -151,5 +153,16 @@ describe('POST /api/checkout/validate-coupon', () => {
       .send({ code: 'NOPE' });
     expect(res.status).toBe(404);
     expect(res.body.message).toBe('Invalid discount code');
+  });
+
+  it('rejects a collection-scoped code with no eligible cart items', async () => {
+    (prisma.collectionProduct.findMany as jest.Mock).mockResolvedValue([]);
+    mockValidate.mockResolvedValue({
+      ok: true,
+      discount: { code: 'COLL', discountType: 'percentage', discountValue: 10, minOrderValue: null, scope: { kind: 'collections', ids: ['cX'] } },
+    });
+    const res = await request(app).post('/api/checkout/validate-coupon').send({ code: 'COLL' });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toContain("aren't in your cart");
   });
 });

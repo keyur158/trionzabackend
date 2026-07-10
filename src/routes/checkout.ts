@@ -7,6 +7,7 @@ import { createShopifyOrder } from '../services/shopify-order';
 import { createOrFindShopifyCustomer } from '../services/shopify-customer';
 import { sendOrderPush } from '../services/push';
 import { validateShopifyDiscount, ValidatedDiscount } from '../services/shopify-discount';
+import { computeDiscountAmount } from '../services/discount-apply';
 
 const router = Router();
 
@@ -62,9 +63,11 @@ async function computeTotals(customerId: string, shippingRateId: number, couponC
       throw err;
     }
     discount = validation.discount;
-    discountAmount = discount.discountType === 'percentage'
-      ? (subtotal * discount.discountValue) / 100
-      : Math.min(discount.discountValue, subtotal);
+    discountAmount = await computeDiscountAmount(discount, cart.items.map((i: { productId: string; quantity: number; variant: { price: unknown } }) => ({
+      productId: i.productId,
+      price: Number(i.variant.price),
+      quantity: i.quantity,
+    })));
   }
 
   const tax = 0;
@@ -106,13 +109,16 @@ router.post('/validate-coupon', requireAuth, async (req: Request, res: Response)
     res.status(400).json({ message: 'code is required' });
     return;
   }
-  // Subtotal of the current cart for the minimum-purchase check.
   const cart = await prisma.cart.findUnique({
     where: { customerId: req.user!.id },
-    include: { items: { include: { variant: { select: { price: true } } } } },
+    include: { items: { select: { productId: true, quantity: true, variant: { select: { price: true } } } } },
   });
-  const subtotal =
-    cart?.items.reduce((sum, item) => sum + Number(item.variant.price) * item.quantity, 0) ?? 0;
+  const lines = (cart?.items ?? []).map(i => ({
+    productId: i.productId,
+    price: Number(i.variant.price),
+    quantity: i.quantity,
+  }));
+  const subtotal = lines.reduce((sum, l) => sum + l.price * l.quantity, 0);
 
   const validation = await validateShopifyDiscount(String(code).trim(), subtotal);
   if (!validation.ok) {
@@ -120,11 +126,22 @@ router.post('/validate-coupon', requireAuth, async (req: Request, res: Response)
     return;
   }
   const d = validation.discount;
+
+  let discountAmount: number;
+  try {
+    discountAmount = await computeDiscountAmount(d, lines);
+  } catch (err: unknown) {
+    const status = (err as { statusCode?: number })?.statusCode ?? 400;
+    res.status(status).json({ message: err instanceof Error ? err.message : 'Invalid discount code' });
+    return;
+  }
+
   res.json({
     code: d.code,
     discountType: d.discountType,
     discountValue: d.discountValue,
     minOrderValue: d.minOrderValue,
+    discountAmount: discountAmount.toFixed(2),
   });
 });
 
