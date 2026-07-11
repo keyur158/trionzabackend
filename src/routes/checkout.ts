@@ -8,6 +8,7 @@ import { createOrFindShopifyCustomer } from '../services/shopify-customer';
 import { sendOrderPush } from '../services/push';
 import { validateShopifyDiscount, ValidatedDiscount } from '../services/shopify-discount';
 import { computeDiscountAmount } from '../services/discount-apply';
+import { sendPurchaseEvent, extractRequestContext } from '../services/meta-capi';
 
 const router = Router();
 
@@ -403,12 +404,32 @@ router.post('/create-order', requireAuth, async (req: Request, res: Response) =>
 
   res.json({ success: true, order: { id: order.id, orderNumber: order.orderNumber, totalPrice: order.totalPrice, financialStatus: order.financialStatus } });
 
+  const metaCtx = extractRequestContext(req);
   setImmediate(async () => {
     try {
       const tokens = customer.deviceTokens.map(dt => dt.fcmToken);
       if (tokens.length > 0) await sendOrderPush(tokens, 'confirmed', orderNumber);
     } catch (err) {
       console.error('FCM push failed:', err);
+    }
+    try {
+      await sendPurchaseEvent({
+        orderId: order.id,
+        orderNumber,
+        total: totals.total,
+        contentIds: [...new Set(lineItemsData.map(li => li.productId))],
+        numItems: lineItemsData.reduce((sum, li) => sum + li.quantity, 0),
+        customer: {
+          id: customer.id,
+          email: customer.email,
+          firstName: customer.firstName,
+          lastName: customer.lastName,
+          phone: customer.phone,
+        },
+        ctx: metaCtx,
+      });
+    } catch (err) {
+      console.error('Meta CAPI Purchase failed:', err);
     }
   });
 });
