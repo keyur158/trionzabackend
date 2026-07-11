@@ -17,4 +17,12 @@ describe('env config', () => {
     expect(typeof env.DATABASE_URL).toBe('string');
     expect(env.DATABASE_URL.startsWith('postgresql://')).toBe(true);
   });
+
+  it('defaults Meta CAPI vars to disabled', () => {
+    const { env } = require('../config/env');
+    expect(env.META_PIXEL_ID).toBe('');
+    expect(env.META_CAPI_ACCESS_TOKEN).toBe('');
+    expect(env.META_GRAPH_API_VERSION).toBe('v23.0');
+    expect(env.META_TEST_EVENT_CODE).toBe('');
+  });
 });

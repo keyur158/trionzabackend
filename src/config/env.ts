@@ -27,6 +27,13 @@ const envSchema = z.object({
   APP_PUBLIC_URL: z.string().default('https://trionzadiamond.com'),
   FIREBASE_SERVICE_ACCOUNT: z.string().default('./firebase-service-account.json'),
   SYNC_INTERVAL_HOURS: z.coerce.number().int().min(1).default(6),
+  // Meta (Facebook) Conversions API. All empty by default = CAPI disabled;
+  // no events are sent unless both the pixel id and token are set.
+  META_PIXEL_ID: z.string().default(''),
+  META_CAPI_ACCESS_TOKEN: z.string().default(''),
+  META_GRAPH_API_VERSION: z.string().default('v23.0'),
+  // When set, events land in Events Manager's "Test Events" tab instead of production.
+  META_TEST_EVENT_CODE: z.string().default(''),
 });
 
 export const env = envSchema.parse(process.env);
