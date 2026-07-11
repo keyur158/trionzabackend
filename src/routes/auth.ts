@@ -10,6 +10,7 @@ import {
 } from '../services/shopify-customer';
 import { sendOtpEmail } from '../services/email';
 import { isAdminEmail } from '../utils/admin';
+import { sendCompleteRegistrationEvent, extractRequestContext } from '../services/meta-capi';
 
 const router = Router();
 
@@ -170,6 +171,7 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
       },
     });
 
+    const metaCtx = extractRequestContext(req);
     setImmediate(async () => {
       const shopifyGid = await createShopifyCustomer({
         email,
@@ -179,6 +181,20 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
       });
       if (shopifyGid) {
         await prisma.customer.update({ where: { id: customer.id }, data: { shopifyCustomerId: shopifyGid } });
+      }
+      try {
+        await sendCompleteRegistrationEvent({
+          customer: {
+            id: customer.id,
+            email: customer.email,
+            firstName: customer.firstName,
+            lastName: customer.lastName,
+            phone: otp.phone,
+          },
+          ctx: metaCtx,
+        });
+      } catch (err) {
+        console.error('Meta CAPI CompleteRegistration failed:', err);
       }
     });
 
