@@ -21,6 +21,7 @@ import request from 'supertest';
 import router from '../routes/auth';
 import { prisma } from '../config/database';
 import { sendCompleteRegistrationEvent } from '../services/meta-capi';
+import { createShopifyCustomer } from '../services/shopify-customer';
 
 const app = express();
 app.use(express.json());
@@ -52,6 +53,29 @@ describe('POST /api/auth/verify-otp signup fires Meta CompleteRegistration', () 
     (prisma.customer.create as jest.Mock).mockResolvedValue({
       id: 'cust-new', email: 'new@user.com', firstName: 'New', lastName: 'User', phone: '555',
     });
+
+    const res = await request(app)
+      .post('/api/auth/verify-otp')
+      .send({ email: 'new@user.com', code: '123456' });
+
+    expect(res.status).toBe(201);
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    expect(sendCompleteRegistrationEvent).toHaveBeenCalledTimes(1);
+    expect((sendCompleteRegistrationEvent as jest.Mock).mock.calls[0][0].customer)
+      .toMatchObject({ id: 'cust-new', email: 'new@user.com' });
+  });
+
+  it('still sends the event when the Shopify customer sync (prisma update) fails', async () => {
+    (prisma.otpCode.findFirst as jest.Mock).mockResolvedValue(otpRow('signup'));
+    (prisma.otpCode.update as jest.Mock).mockResolvedValue({});
+    (prisma.customer.findUnique as jest.Mock).mockResolvedValue(null);
+    (prisma.customer.create as jest.Mock).mockResolvedValue({
+      id: 'cust-new', email: 'new@user.com', firstName: 'New', lastName: 'User', phone: '555',
+    });
+    (createShopifyCustomer as jest.Mock).mockResolvedValue('gid://shopify/Customer/1');
+    (prisma.customer.update as jest.Mock).mockRejectedValue(new Error('db unavailable'));
 
     const res = await request(app)
       .post('/api/auth/verify-otp')

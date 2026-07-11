@@ -173,14 +173,18 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
 
     const metaCtx = extractRequestContext(req);
     setImmediate(async () => {
-      const shopifyGid = await createShopifyCustomer({
-        email,
-        firstName: otp.firstName ?? undefined,
-        lastName: otp.lastName ?? undefined,
-        phone: otp.phone ?? undefined,
-      });
-      if (shopifyGid) {
-        await prisma.customer.update({ where: { id: customer.id }, data: { shopifyCustomerId: shopifyGid } });
+      try {
+        const shopifyGid = await createShopifyCustomer({
+          email,
+          firstName: otp.firstName ?? undefined,
+          lastName: otp.lastName ?? undefined,
+          phone: otp.phone ?? undefined,
+        });
+        if (shopifyGid) {
+          await prisma.customer.update({ where: { id: customer.id }, data: { shopifyCustomerId: shopifyGid } });
+        }
+      } catch (err) {
+        console.error('Shopify customer sync failed:', err);
       }
       try {
         await sendCompleteRegistrationEvent({
