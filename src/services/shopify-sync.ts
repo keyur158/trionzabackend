@@ -281,6 +281,7 @@ export function mapProductNode(node: any, labelByGid: Map<string, string>) {
       option1: (v.selectedOptions as Array<{ value: string }>)[0]?.value ?? null,
       option2: (v.selectedOptions as Array<{ value: string }>)[1]?.value ?? null,
       option3: (v.selectedOptions as Array<{ value: string }>)[2]?.value ?? null,
+      selected_options: (v.selectedOptions as Array<{ name: string; value: string }>) ?? [],
     };
   });
 

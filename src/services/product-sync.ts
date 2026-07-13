@@ -11,6 +11,8 @@ interface ShopifyVariantWebhook {
   option1: string | null;
   option2: string | null;
   option3: string | null;
+  // GraphQL sync carries the real option names; REST webhooks do not.
+  selected_options?: Array<{ name: string; value: string }>;
 }
 
 interface ShopifyProductWebhook {
@@ -27,6 +29,27 @@ interface ShopifyProductWebhook {
   variants: ShopifyVariantWebhook[];
   images: Array<{ id: number; src: string }>;
   metafields?: Record<string, string | string[]>;
+  // REST webhook payloads name the option axes here, in position order.
+  options?: Array<{ name: string; position?: number }>;
+}
+
+/**
+ * Option name/value pairs for a variant, carrying Shopify's real axis names
+ * ("Material", "Carat Weight") so the app can render one selector per axis.
+ * Falls back to the product's option list, then to generic positional names.
+ */
+function variantOptions(
+  variant: ShopifyVariantWebhook,
+  optionNames: string[],
+): Array<{ name: string; value: string }> {
+  if (variant.selected_options?.length) {
+    return variant.selected_options.filter(o => o?.name && o?.value);
+  }
+  return [variant.option1, variant.option2, variant.option3]
+    .map((value, i) =>
+      value ? { name: optionNames[i] ?? `Option ${i + 1}`, value } : null,
+    )
+    .filter(Boolean) as Array<{ name: string; value: string }>;
 }
 
 export async function upsertProduct(payload: ShopifyProductWebhook): Promise<void> {
@@ -84,12 +107,13 @@ export async function upsertProduct(payload: ShopifyProductWebhook): Promise<voi
 
     // Upsert variants in place — delete-and-recreate fails when a variant is
     // referenced by a CartItem (FK Restrict), which dropped the whole update.
+    const optionNames = (payload.options ?? [])
+      .slice()
+      .sort((a, b) => (a.position ?? 0) - (b.position ?? 0))
+      .map(o => o.name);
+
     for (const v of payload.variants) {
-      const opts = [
-        v.option1 ? { name: 'Option 1', value: v.option1 } : null,
-        v.option2 ? { name: 'Option 2', value: v.option2 } : null,
-        v.option3 ? { name: 'Option 3', value: v.option3 } : null,
-      ].filter(Boolean);
+      const opts = variantOptions(v, optionNames);
       const data = {
         title: v.title,
         price: parseFloat(v.price),
